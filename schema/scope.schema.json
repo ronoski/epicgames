@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epicgames-recon/schema/scope.schema.json",
+  "title": "Scope configuration, snapshot, binding and drift",
+  "description": "Default-deny, exclusion-wins, snapshot-is-authoritative. See docs/safety-model.md section 2.",
+  "type": "object",
+  "properties": {
+    "config": {
+      "type": "object",
+      "description": "Operator-supplied scope rules. include MUST be non-empty (default-deny would touch nothing otherwise).",
+      "required": ["include"],
+      "properties": {
+        "include": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "e.g. '*.epicgames.com', '203.0.113.0/24'" },
+        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Exclusions win over includes" },
+        "wildcard_includes_apex": { "type": "boolean", "default": true },
+        "notes": { "type": "string", "description": "Must reflect the live hackerone.com/epicgames policy; verify before use" }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "description": "A content-hashed, timestamped capture of the live policy. Authoritative at observation time.",
+      "required": ["snapshot_id", "taken_at", "content_sha256", "half_life"],
+      "properties": {
+        "snapshot_id": { "type": "string" },
+        "taken_at": { "type": "string", "format": "date-time" },
+        "content_sha256": { "type": "string" },
+        "etag": { "type": "string" },
+        "structured_scopes": { "type": "array", "items": { "type": "object" } },
+        "policy_markdown_sha256": { "type": "string" },
+        "half_life": { "type": "string", "description": "ISO-8601 duration; short (e.g. PT24H). Past it => re-fetch + re-bind before any ALLOW." },
+        "program_visibility": { "enum": ["public", "invite_only", "unknown"], "description": "verify-live; changes authorization/confidentiality constraints" }
+      }
+    },
+    "drift_event": {
+      "type": "object",
+      "description": "Emitted when two snapshots differ. Blocks downstream action until re-bound.",
+      "required": ["from_snapshot", "to_snapshot", "changes"],
+      "properties": {
+        "from_snapshot": { "type": "string" },
+        "to_snapshot": { "type": "string" },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "change": { "enum": ["asset_added", "asset_removed", "asset_changed"] },
+              "asset": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

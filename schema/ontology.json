@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epicgames-recon/schema/ontology.json",
+  "title": "Recon knowledge-graph ontology (closed type registry)",
+  "schema_version": "0.1.0",
+  "description": "The closed set of node and edge types. The autonomous loop cannot use a type absent from this registry; a new type must be added to proposed_additions and promoted by a human.",
+  "node_types": {
+    "Organization":   { "id": "org:<slug>",                 "desc": "Top-level owner" },
+    "BusinessUnit":   { "id": "bu:<slug>",                  "desc": "Acquisition / product line" },
+    "Domain":         { "id": "domain:<registrable>",       "desc": "Registrable domain / apex" },
+    "DNSName":        { "id": "dns:<fqdn>",                 "desc": "Hostname + records" },
+    "NetBlock":       { "id": "net:<cidr>",                 "desc": "IP range" },
+    "ASN":            { "id": "asn:<n>",                    "desc": "Autonomous system" },
+    "Host":           { "id": "host:<ip>",                  "desc": "Resolved IP endpoint" },
+    "Service":        { "id": "svc:<ip>:<port>/<proto>",    "desc": "Listening service" },
+    "WebApp":         { "id": "web:<scheme>://<vhost>",     "desc": "Virtual host / web app" },
+    "Route":          { "id": "route:<webapp>/<template>",  "desc": "Path template" },
+    "Operation":      { "id": "op:<method>:<route>",        "desc": "Typed API operation" },
+    "Parameter":      { "id": "param:<op>#<name>",          "desc": "Typed input" },
+    "AuthScheme":     { "id": "auth:<id>",                  "desc": "Auth mechanism" },
+    "Credential":     { "id": "cred:<hash>",                "desc": "Client id / key (mapping fact)" },
+    "Token":          { "id": "tok:<hash>",                 "desc": "Token shape / issuer (never plaintext secret)" },
+    "ObjectType":     { "id": "obj:<name>",                 "desc": "Data object / identifier type" },
+    "Flow":           { "id": "flow:<slug>",                "desc": "Multi-step process (state machine)" },
+    "Artifact":       { "id": "art:<sha256>",              "desc": "Binary/APK/JS/manifest/repo/package" },
+    "Evidence":       { "id": "ev:<sha256>[:region]",       "desc": "Content-addressed raw proof" },
+    "Hypothesis":     { "id": "hyp:<uuid>",                 "desc": "Testable, non-actioned lead" }
+  },
+  "edge_types": [
+    "resolves_to", "cname_to", "hosted_on", "in_netblock", "fronted_by", "vhost_of",
+    "exposes", "takes", "authenticates_with", "issued_by", "grants", "references_object",
+    "derived_from", "calls", "step_of", "evidenced_by", "corroborates", "contradicts",
+    "attributed_to"
+  ],
+  "proposed_additions": {
+    "note": "Declared but NOT usable until a human promotes them. Until then, record only as typed corroborates/contradicts evidence.",
+    "edges": ["originated_by (NetBlock->ASN)", "same_as", "co_deploy", "shared_trust_domain", "allows_origin (WebApp->Origin)"],
+    "nodes": ["Origin (required before allows_origin can be promoted)"]
+  },
+  "naming_rules": {
+    "ownership_edge": "attributed_to (never owned_by)",
+    "bgp_origin_edge": "originated_by (never announced_by)",
+    "containment_edge": "derived_from (never part_of)"
+  },
+  "invariants_ref": "../docs/safety-model.md#9-machine-checkable-invariants-ci-over-the-data"
+}

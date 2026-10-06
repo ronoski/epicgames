@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epicgames-recon/schema/event.schema.json",
+  "title": "Event-sourcing event",
+  "description": "The append-only, ordered log is the source of truth; the graph and per-run diffs are projections. See docs/SPEC.md section 4.1.",
+  "type": "object",
+  "required": ["seq", "ts", "run_id", "kind", "payload"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0, "description": "Total order within the log" },
+    "ts": { "type": "string", "format": "date-time" },
+    "run_id": { "type": "string" },
+    "cycle": { "type": "integer", "description": "Autonomous-loop cycle index" },
+    "kind": {
+      "enum": [
+        "scope_snapshot_taken", "scope_drift_detected", "scope_binding_set",
+        "gate_decision_recorded", "rate_debit", "evidence_captured",
+        "node_upserted", "edge_upserted", "contradiction_forked",
+        "coverage_updated", "gap_enqueued", "gap_dispatched",
+        "hypothesis_raised", "invariant_violation", "loop_halted"
+      ]
+    },
+    "payload": { "type": "object", "description": "Kind-specific; node/edge payloads validate against node.schema.json" },
+    "actor": { "enum": ["autonomous_loop", "human", "migration"], "default": "autonomous_loop" },
+    "idempotency_key": { "type": "string", "description": "Re-applying an event with the same key is a no-op" }
+  }
+}

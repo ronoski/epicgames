@@ -1,0 +1,32 @@
+# Self-test / lab config — safe to run anywhere.
+#
+# Uses IANA-reserved documentation domains (example.com/.org) and keeps active modules
+# OFF, so `recon plan` and `recon run` exercise the full pipeline without sending a single
+# packet to anyone. Use this to smoke-test the pipeline and to demo the AI-session runbook.
+#
+# This is NOT a bug-bounty config. For a real engagement, copy
+# configs/epicgames.example.yaml and fill scope from the live program policy.
+
+scope:
+  include:
+    - "*.example.com"
+  exclude:
+    - "secret.example.com"
+  prefilter:
+    - "*.example.org"       # "owned but unlisted" -> prefilter_only, never actioned
+
+targets:
+  - "*.example.com"
+
+# Pinned policy text -> content-hashed snapshot. Real runs paste the live policy here.
+policy_text: "self-test policy v1 (no real program)"
+policy_half_life: "PT24H"
+
+# Active modules stay disabled. Flipping this to true is a deliberate, reviewed act.
+allow_active: false
+allow_live_credential_use: false
+passive_first: true
+
+rate:
+  global_qps_ceiling: 1.0
+  per_target_concurrency: 1
