@@ -52,10 +52,26 @@ class ModuleContext:
     def in_scope(self, value: str) -> bool:
         return self.scope.is_in_scope(value)
 
-    def gate_active(self, value: str, verb: str) -> ScopeBinding:
+    def snapshot_ok(self) -> bool:
+        """True when a usable (present, non-stale) policy snapshot is pinned.
+
+        Passive modules should check this before retaining anything: without a snapshot
+        :meth:`bind` can only produce an empty ``snapshot_id``, which fails invariant I1.
+        Active modules get this for free inside :meth:`gate_active`.
+        """
+
+        return self.snapshot is not None and not self.snapshot.is_stale(self.clock_now())
+
+    def gate_active(self, value: str, verb: str, *, ledger_key: str | None = None) -> ScopeBinding:
         """Authorize one active touch of ``value`` with ``verb`` or raise ``GateRefused``.
 
         Writes an ALLOW/REFUSE gate_decision_recorded event either way.
+
+        ``ledger_key`` charges the rate budget to an explicit owning target instead of to
+        ``value`` itself. Pass it when probing a bare IP: the safety model requires the
+        ledger be keyed by registrable domain / apex / vhost and explicitly NOT by a shared
+        IP, so a port scan of an address reached via a hostname should be charged to that
+        hostname's target, not to the address.
         """
 
         def refuse(reason: str):
@@ -79,7 +95,7 @@ class ModuleContext:
         if binding.verdict != Verdict.IN_SCOPE:
             refuse(f"not in scope: {binding.rule_matched} ({binding.verdict.value})")
         try:
-            entry = self.ledger.debit(value, verb)
+            entry = self.ledger.debit(ledger_key or value, verb)
         except RateBudgetExceeded as exc:
             refuse(str(exc))
         self.graph.log.append("rate_debit",

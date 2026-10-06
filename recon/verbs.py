@@ -9,7 +9,7 @@ from __future__ import annotations
 ALLOWED: frozenset[str] = frozenset({
     "resolve", "enumerate", "passive-collect", "fingerprint",
     "http-GET", "http-HEAD", "read-openapi", "graphql-introspect",
-    "parse", "crawl-within-scope", "port-scan", "bucket-list",
+    "parse", "crawl-within-scope", "port-scan", "tls-handshake", "bucket-list",
     "hash", "unzip", "strings", "nm-symbols", "static-decompile",
     "parse-manifest", "parse-catalog", "diff-manifest",
     "extract-endpoint", "extract-client-id",
@@ -30,9 +30,15 @@ BLOCKED: frozenset[str] = frozenset({
 })
 
 # Active (traffic-to-target) verbs. Passive verbs touch only third-party/OSINT sources.
+#
+# Note on "fingerprint": it is deliberately NOT active, because fingerprinting is often
+# computed from already-captured evidence (response hashes, stored certs) with no new
+# traffic. A module that must open a TLS connection to read a served certificate spends
+# "tls-handshake" instead, so the ledger entry and the ALLOW record describe the real spend
+# rather than mislabelling a handshake as a port scan.
 ACTIVE: frozenset[str] = frozenset({
     "resolve", "http-GET", "http-HEAD", "read-openapi", "graphql-introspect",
-    "crawl-within-scope", "port-scan", "bucket-list",
+    "crawl-within-scope", "port-scan", "tls-handshake", "bucket-list",
 })
 
 

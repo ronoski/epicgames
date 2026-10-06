@@ -403,24 +403,46 @@ def test_never_gates_and_never_debits_the_ledger(tmp_path, monkeypatch):
     assert ctx.ledger.log == []
     assert ctx.ledger.balance("epicgames.com") == pytest.approx(4.0)
     kinds = {e.kind for e in ctx.graph.log.all()}
+    # The invariant that matters: a passive module never gates and never debits.
     assert "gate_decision_recorded" not in kinds and "rate_debit" not in kinds
-    assert kinds == {"node_upserted"}
+    # It may record its own findings/negative space, but only via declared kinds.
+    assert kinds <= {"node_upserted", "evidence_captured", "scope_binding_set"}
 
 
-def test_runs_with_active_disabled_and_a_stale_snapshot(tmp_path, monkeypatch):
-    """A passive source needs no non-stale snapshot to *query*, only to bind retention."""
+def test_runs_with_active_disabled(tmp_path, monkeypatch):
+    """allow_active=False must not stop a passive module; it never gates in the first place."""
 
-    stale = take_snapshot("old policy", now=datetime(2026, 1, 1, tzinfo=timezone.utc))
-    ctx = make_ctx(tmp_path, snapshot=stale, allow_active=False)
-    assert stale.is_stale(NOW)
+    ctx = make_ctx(tmp_path, allow_active=False)
     install_fake_get(monkeypatch, crtsh_json("api.epicgames.com"))
 
     summary = crtsh.CrtShModule(ctx).run([FakeNode("domain:epicgames.com", "Domain")])
-
     assert summary["emitted"] == 1
-    node = ctx.graph.store.get("dns:api.epicgames.com")
-    # bound to the snapshot it actually observed under, so I1/I12 can catch it downstream
-    assert node.scope_binding.snapshot_id == stale.snapshot_id
+
+
+def test_stale_snapshot_blocks_retention_and_the_query(tmp_path, monkeypatch):
+    stale = take_snapshot("old policy", now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert stale.is_stale(NOW)
+    ctx = make_ctx(tmp_path, snapshot=stale)
+    calls = install_fake_get(monkeypatch, crtsh_json("api.epicgames.com"))
+
+    summary = crtsh.CrtShModule(ctx).run([FakeNode("domain:epicgames.com", "Domain")])
+
+    assert calls == []  # I12: a stale snapshot blocks downstream work
+    assert ctx.graph.store.nodes == {}
+    assert summary["emitted"] == 0
+    assert "stale" in summary["blocked"]
+
+
+def test_missing_snapshot_blocks_retention_and_the_query(tmp_path, monkeypatch):
+    ctx = make_ctx(tmp_path, snapshot=None)
+    calls = install_fake_get(monkeypatch, crtsh_json("api.epicgames.com"))
+
+    summary = crtsh.CrtShModule(ctx).run([FakeNode("domain:epicgames.com", "Domain")])
+
+    assert calls == []
+    assert ctx.graph.store.nodes == {}
+    assert summary["emitted"] == 0
+    assert "no scope snapshot" in summary["blocked"]
 
 
 def test_no_edges_emitted(tmp_path, monkeypatch):
