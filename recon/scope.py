@@ -21,6 +21,18 @@ from dataclasses import dataclass
 from .models import ScopeBinding, Verdict
 
 
+def is_network_literal(value: str) -> bool:
+    """True when the value carries an explicit prefix length (e.g. ``10.0.0.0/8``)."""
+
+    if "/" not in (value or ""):
+        return False
+    try:
+        ipaddress.ip_network(value.strip(), strict=False)
+        return True
+    except ValueError:
+        return False
+
+
 def classify(value: str) -> str:
     """Return ``"ip"`` for an IP address or network, else ``"host"``."""
 
@@ -73,9 +85,19 @@ class ScopeRule:
     raw: str
     host: str | None = None
     network: object | None = None
+    includes_apex: bool = True
+    # True for an exclude rule: network matching then uses overlap, not containment,
+    # because a partial overlap with an out-of-scope block must still exclude.
+    is_exclusion: bool = False
 
     @classmethod
-    def parse(cls, rule: str) -> "ScopeRule":
+    def parse(
+        cls,
+        rule: str,
+        *,
+        wildcard_includes_apex: bool = True,
+        is_exclusion: bool = False,
+    ) -> "ScopeRule":
         rule = rule.strip()
         if not rule:
             raise ValueError("empty scope rule")
@@ -83,29 +105,54 @@ class ScopeRule:
             apex = normalize_host(rule[2:])
             if not apex:
                 raise ValueError(f"invalid wildcard rule: {rule!r}")
-            return cls(kind="wildcard", raw=rule, host=apex)
+            return cls(kind="wildcard", raw=rule, host=apex,
+                       includes_apex=wildcard_includes_apex, is_exclusion=is_exclusion)
         if classify(rule) == "ip":
-            return cls(kind="network", raw=rule, network=ipaddress.ip_network(rule, strict=False))
-        return cls(kind="host", raw=rule, host=normalize_host(rule))
+            return cls(kind="network", raw=rule,
+                       network=ipaddress.ip_network(rule, strict=False),
+                       is_exclusion=is_exclusion)
+        return cls(kind="host", raw=rule, host=normalize_host(rule),
+                   is_exclusion=is_exclusion)
 
     def matches(self, value: str) -> bool:
         kind = classify(value)
         if self.kind == "network":
             if kind != "ip":
                 return False
-            try:
-                addr = ipaddress.ip_address(normalize_host(value))
-            except ValueError:
-                return False
-            return addr in self.network  # type: ignore[operator]
+            return self._matches_ip(value)
         if kind == "ip":
             return False  # hostname rules never authorize raw IPs
         host = normalize_host(value)
         if self.kind == "host":
             return host == self.host
         if self.kind == "wildcard":
-            return host == self.host or host.endswith("." + str(self.host))
+            if host == self.host:
+                return self.includes_apex
+            return host.endswith("." + str(self.host))
         return False
+
+    def _matches_ip(self, value: str) -> bool:
+        """Match an address, or a whole network.
+
+        A *network* value must be fully contained to be included — seeding
+        ``203.0.113.0/22`` against an include of ``203.0.113.0/24`` previously bound
+        in_scope on the network address alone, authorizing three quarters of a block the
+        rule never covered. Exclusions use overlap instead: any intersection with an
+        out-of-scope block is enough to refuse.
+        """
+
+        try:
+            if is_network_literal(value):
+                net = ipaddress.ip_network(value.strip(), strict=False)
+                if net.version != self.network.version:  # type: ignore[union-attr]
+                    return False
+                if self.is_exclusion:
+                    return net.overlaps(self.network)  # type: ignore[arg-type]
+                return net.subnet_of(self.network)  # type: ignore[arg-type]
+            addr = ipaddress.ip_address(normalize_host(value))
+            return addr in self.network  # type: ignore[operator]
+        except (ValueError, TypeError):
+            return False
 
     def specificity(self) -> int:
         """Higher = more specific. Exact host > wildcard > network (by prefix length)."""
@@ -129,11 +176,21 @@ class Scope:
         wildcard_includes_apex: bool = True,
     ) -> None:
         self.wildcard_includes_apex = wildcard_includes_apex
-        self._include = [ScopeRule.parse(r) for r in (include or [])]
-        self._exclude = [ScopeRule.parse(r) for r in (exclude or [])]
+        self._include = [
+            ScopeRule.parse(r, wildcard_includes_apex=wildcard_includes_apex)
+            for r in (include or [])
+        ]
+        self._exclude = [
+            ScopeRule.parse(r, wildcard_includes_apex=wildcard_includes_apex,
+                            is_exclusion=True)
+            for r in (exclude or [])
+        ]
         # Ownership prefilter: owned-but-unlisted assets (e.g. Epic domains not in the
         # program) bind to prefilter_only. Never actionable.
-        self._prefilter = [ScopeRule.parse(r) for r in (prefilter or [])]
+        self._prefilter = [
+            ScopeRule.parse(r, wildcard_includes_apex=wildcard_includes_apex)
+            for r in (prefilter or [])
+        ]
         if not self._include:
             raise ValueError(
                 "scope has no include rules; refusing an empty allowlist (default-deny "

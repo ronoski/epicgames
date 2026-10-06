@@ -10,12 +10,22 @@ from .models import (
     ScopeBinding, Sensitivity, Temporal,
 )
 
-# Sensible default decay half-lives per node type (ISO-8601 durations).
+# Default decay half-lives per node type (ISO-8601 durations). Chosen by how fast the fact
+# class actually changes: DNS moves in days, a netblock allocation in years, a live token
+# in hours. A fact past its half-life is re-queued for verification by the planner.
 DEFAULT_HALF_LIFE = {
-    "DNSName": "P7D", "Host": "P3D", "Service": "P3D", "WebApp": "P7D",
-    "Operation": "P30D", "Parameter": "P30D", "AuthScheme": "P30D",
-    "Credential": "P90D", "Token": "PT12H", "ObjectType": "P90D",
-    "Flow": "P180D", "Artifact": "P365D", "Domain": "P30D",
+    # fast-moving
+    "Token": "PT12H", "Host": "P3D", "Service": "P3D",
+    "DNSName": "P7D", "WebApp": "P7D",
+    # a guess is meant to be confirmed or let go quickly
+    "Hypothesis": "P3D",
+    # contract/structure: stable but not permanent
+    "Route": "P30D", "Operation": "P30D", "Parameter": "P30D",
+    "AuthScheme": "P30D", "Domain": "P30D", "Certificate": "P30D",
+    # slow-moving
+    "Credential": "P90D", "ObjectType": "P90D",
+    "NetBlock": "P180D", "ASN": "P180D", "Flow": "P180D",
+    "BusinessUnit": "P365D", "Organization": "P365D", "Artifact": "P365D",
 }
 
 

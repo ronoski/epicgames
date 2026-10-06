@@ -41,6 +41,11 @@ class ModuleContext:
     user_agent: str = "recon-workflow/0.1 (+authorized-testing)"
     timeout: float = 8.0
     now: datetime | None = None
+    # A SEPARATE ledger for third-party/OSINT sources (crt.sh, archive.org, ...).
+    # safety-model.md §4: passive sources consume a third-party budget and must NEVER
+    # debit the target's budget. Keeping them apart means passive politeness is centrally
+    # capped and auditable instead of being per-module convention.
+    third_party_ledger: RateLedger | None = None
 
     def clock_now(self) -> datetime:
         return self.now or clock.now()
@@ -62,7 +67,58 @@ class ModuleContext:
 
         return self.snapshot is not None and not self.snapshot.is_stale(self.clock_now())
 
-    def gate_active(self, value: str, verb: str, *, ledger_key: str | None = None) -> ScopeBinding:
+    def spend_third_party(self, source_host: str, cost: float = 1.0) -> bool:
+        """Debit the third-party source budget for a PASSIVE query. Never the target's.
+
+        Returns False when the budget is exhausted, so a passive module backs off instead
+        of hammering an aggregator. A missing third_party_ledger means unmetered (the
+        caller's own constants apply) — wire one in :func:`recon.pipeline.build_runtime`.
+        """
+
+        if self.third_party_ledger is None:
+            return True
+        try:
+            entry = self.third_party_ledger.debit(source_host, "passive-collect", cost)
+        except RateBudgetExceeded as exc:
+            self.logger.info("third-party budget exhausted for %s: %s", source_host, exc)
+            return False
+        self.graph.log.append("third_party_debit", {
+            "source": entry.target, "balance_after": entry.balance_after,
+        })
+        return True
+
+    def can_gate(self, value: str, verb: str) -> tuple[bool, str]:
+        """Non-spending pre-check: would :meth:`gate_active` allow this?
+
+        Writes no REFUSE record and debits nothing, so a module can filter a seed list
+        without polluting the audit log with a refusal per candidate.
+        """
+
+        if not self.allow_active:
+            return False, "active modules disabled (allow_active=false)"
+        if self.snapshot is None:
+            return False, "no scope snapshot (verify live policy first)"
+        if self.snapshot.is_stale(self.clock_now()):
+            return False, "scope snapshot is stale; re-fetch + re-bind required"
+        try:
+            verbs.assert_schedulable(verb)
+        except verbs.VerbError as exc:
+            return False, str(exc)
+        if not verbs.is_active(verb):
+            return False, f"{verb!r} is not an active verb"
+        binding = self.bind(value)
+        if binding.verdict != Verdict.IN_SCOPE:
+            return False, f"not in scope: {binding.rule_matched} ({binding.verdict.value})"
+        return True, binding.rule_matched
+
+    def gate_active(
+        self,
+        value: str,
+        verb: str,
+        *,
+        ledger_key: str | None = None,
+        cost: float = 1.0,
+    ) -> ScopeBinding:
         """Authorize one active touch of ``value`` with ``verb`` or raise ``GateRefused``.
 
         Writes an ALLOW/REFUSE gate_decision_recorded event either way.
@@ -72,6 +128,9 @@ class ModuleContext:
         ledger be keyed by registrable domain / apex / vhost and explicitly NOT by a shared
         IP, so a port scan of an address reached via a hostname should be charged to that
         hostname's target, not to the address.
+
+        ``cost`` prices an expensive verb above the flat unit, so a multi-probe action can
+        declare what it really spends rather than charging one token per connect.
         """
 
         def refuse(reason: str):
@@ -95,7 +154,7 @@ class ModuleContext:
         if binding.verdict != Verdict.IN_SCOPE:
             refuse(f"not in scope: {binding.rule_matched} ({binding.verdict.value})")
         try:
-            entry = self.ledger.debit(ledger_key or value, verb)
+            entry = self.ledger.debit(ledger_key or value, verb, cost)
         except RateBudgetExceeded as exc:
             refuse(str(exc))
         self.graph.log.append("rate_debit",

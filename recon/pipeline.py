@@ -59,6 +59,12 @@ def build_runtime(
     ctx = ModuleContext(
         scope=config.scope,
         ledger=RateLedger(global_qps=config.rate_qps, capacity=config.rate_capacity),
+        # Separate budget for third-party aggregators (crt.sh, archive.org): passive
+        # politeness is capped centrally and never charged to the target.
+        third_party_ledger=RateLedger(
+            global_qps=config.third_party_qps,
+            capacity=config.third_party_capacity,
+        ),
         evidence=EvidenceStore(workdir / "evidence"),
         graph=graph,
         snapshot=snapshot,

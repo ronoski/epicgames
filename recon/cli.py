@@ -117,6 +117,7 @@ def cmd_invariants(args) -> int:
     violations = invariants.check(
         rt.store, ledger=rt.ctx.ledger,
         current_snapshot=snap.snapshot_id if snap else None,
+        log=rt.graph.log, snapshot=snap,
     )
     _emit({"violations": [asdict(v) for v in violations], "ok": not violations}, args.json)
     return 1 if violations else 0

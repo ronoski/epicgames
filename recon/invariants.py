@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import verbs
+from .clock import now as _now
 from .models import Sensitivity, Verdict
 from .store import GraphStore
 
@@ -24,7 +26,15 @@ def check(
     *,
     ledger=None,
     current_snapshot: str | None = None,
+    log=None,
+    snapshot=None,
 ) -> list[Violation]:
+    """Check the safety invariants over the data. Empty list means clean.
+
+    ``log`` (an :class:`~recon.events.EventLog`) enables the log-derived invariants
+    I10–I12; ``snapshot`` enables the staleness check in I12.
+    """
+
     v: list[Violation] = []
     nodes = list(store.nodes.values())
 
@@ -77,5 +87,46 @@ def check(
             node = store.get(endpoint)
             if node is not None and node.data_subject == "other":
                 v.append(Violation("I9", f"edge {e.id} has other-user PII endpoint {endpoint}"))
+
+    if log is None:
+        return v
+
+    events = list(getattr(log, "all", list)())
+
+    # I10: every dispatched verb was on the whitelist and auto-dispatchable.
+    for evt in events:
+        if evt.kind != "gap_dispatched":
+            continue
+        verb = evt.payload.get("verb", "")
+        try:
+            verbs.assert_schedulable(verb)
+        except verbs.VerbError as exc:
+            v.append(Violation("I10", f"dispatched non-schedulable verb {verb!r}: {exc}"))
+
+    # I11: a contradiction forked rather than overwrote — every contradiction_forked
+    # event must point at a node that actually records what it forked from.
+    for evt in events:
+        if evt.kind != "contradiction_forked":
+            continue
+        nid = evt.payload.get("id", "")
+        node = store.get(nid) or store.edges.get(nid)
+        if node is None:
+            v.append(Violation("I11", f"contradiction_forked {nid!r} produced no node"))
+        elif not node.confidence.forked_from:
+            v.append(Violation("I11", f"fork {nid!r} does not record forked_from"))
+
+    # I12: a stale snapshot blocks downstream action — no ALLOW may be granted after the
+    # pinned snapshot went stale.
+    if snapshot is not None and snapshot.is_stale(_now()):
+        allows = [
+            e for e in events
+            if e.kind == "gate_decision_recorded" and e.payload.get("decision") == "ALLOW"
+        ]
+        if allows:
+            v.append(Violation(
+                "I12",
+                f"{len(allows)} ALLOW decision(s) exist while snapshot "
+                f"{snapshot.snapshot_id!r} is stale; re-bind required",
+            ))
 
     return v

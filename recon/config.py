@@ -19,6 +19,10 @@ class Config:
     modules: list[str] = field(default_factory=lambda: ["seeds", "crtsh"])
     rate_qps: float = 2.0
     rate_capacity: float = 4.0
+    # Third-party/OSINT source budget (crt.sh, archive.org). Separate from the
+    # target's budget per safety-model.md section 4.
+    third_party_qps: float = 1.0
+    third_party_capacity: float = 5.0
     per_target_concurrency: int = 1
     passive_first: bool = True
     allow_active: bool = False  # active modules are OFF by default
@@ -40,6 +44,8 @@ class Config:
             modules=list(data.get("modules", ["seeds", "crtsh"])),
             rate_qps=float(rate.get("global_qps_ceiling", 2.0)),
             rate_capacity=float(rate.get("capacity", max(float(rate.get("global_qps_ceiling", 2.0)), 4.0))),
+            third_party_qps=float(rate.get("third_party_qps", 1.0)),
+            third_party_capacity=float(rate.get("third_party_capacity", 5.0)),
             per_target_concurrency=int(rate.get("per_target_concurrency", 1)),
             passive_first=bool(data.get("passive_first", True)),
             allow_active=bool(data.get("allow_active", False)),

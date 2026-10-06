@@ -16,10 +16,12 @@ from . import clock
 
 EVENT_KINDS = {
     "scope_snapshot_taken", "scope_drift_detected", "scope_binding_set",
-    "gate_decision_recorded", "rate_debit", "evidence_captured",
+    "gate_decision_recorded", "rate_debit", "third_party_debit",
+    "evidence_captured",
     "node_upserted", "edge_upserted", "contradiction_forked",
     "coverage_updated", "gap_enqueued", "gap_dispatched",
-    "hypothesis_raised", "invariant_violation", "loop_halted",
+    "hypothesis_raised", "hypothesis_promoted", "hypothesis_decayed",
+    "invariant_violation", "loop_halted",
 }
 
 

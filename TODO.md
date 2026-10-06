@@ -33,23 +33,23 @@ Each of these is currently re-derived or compromised inside individual modules b
 shared interface could not express it. Fixing them removes duplicated logic and real
 correctness risk.
 
-- [ ] **Shared URL/FQDN canonicalizer** (`recon/urls.py`, or extend `scope.py`).
+- [x] **Shared URL/FQDN canonicalizer** (`recon/urls.py`, or extend `scope.py`).
       `SPEC.md` §3.1 promises specified URL canonicalization, but host/path/authority
       rules are currently re-implemented in `crtsh`, `resolver`, `permutations`,
       `http_probe`, `tls_probe`, `oidc_discovery`, `wayback` and `openapi_discovery`.
       They will drift apart.
-- [ ] **Third-party-source budget for passive modules.** `safety-model.md` §4 says passive
+- [x] **Third-party-source budget for passive modules.** `safety-model.md` §4 says passive
       sources consume a third-party budget, never an Epic per-target one — but the only
       ledger on `ModuleContext` is the Epic one, which passive modules must not debit. So
       crt.sh / archive.org politeness is per-module constants with no central ceiling,
       audit record, or cross-module serialization. Needs its own ledger + event kind.
-- [ ] **`Certificate` node type** in `schema/ontology.json` (or an I5 carve-out for a
+- [x] **`Certificate` node type** in `schema/ontology.json` (or an I5 carve-out for a
       passively served cert). Today `tls_probe` cannot model a cert at all — facts ride as
       `WebApp` attrs — which blocks SPKI-reuse clustering for entity resolution.
-- [ ] **`scope.wildcard_includes_apex` is dead config.** It is accepted and stored but
+- [x] **`scope.wildcard_includes_apex` is dead config.** It is accepted and stored but
       never consulted; `ScopeRule.matches` always treats `*.x` as covering the apex. A
       program whose wildcard excludes the apex would still bind the apex `in_scope`.
-- [ ] **CIDR seeds are bound by network address only.** `Scope` has no subnet-of
+- [x] **CIDR seeds are bound by network address only.** `Scope` has no subnet-of
       containment check, so seeding `203.0.113.0/22` against an include of
       `203.0.113.0/24` binds `in_scope` even though most of the block is outside the rule.
 - [ ] **`param:<op>#<name>` cannot distinguish a `query` from a `header` (or body)
@@ -57,24 +57,34 @@ correctness risk.
       bogus contradiction. `openapi_discovery` de-duplicates by name to avoid it.
 - [ ] **`web:<scheme>://<vhost>` has no port slot**, so a seed like
       `web:https://host:8443` is unreachable (`openapi_discovery` skips and logs it).
-- [ ] **No containment edge for DNSName → Domain.** `derived_from` is the only containment
+- [x] **No containment edge for DNSName → Domain.** `derived_from` is the only containment
       edge and I5 requires its target to be an `Artifact`, so apex/subdomain containment
       cannot be modelled. Needs a promoted `subdomain_of` / `apex_of` edge.
-- [ ] **Missing `factory.DEFAULT_HALF_LIFE` entries** for `Hypothesis`, `NetBlock`, `ASN`
+- [x] **Missing `factory.DEFAULT_HALF_LIFE` entries** for `Hypothesis`, `NetBlock`, `ASN`
       and `Route` (they silently inherit P14D). A candidate's decay window is the whole
       point of "confirm or let it decay", and a netblock allocation is far more stable
       than 14 days.
-- [ ] **`gate_active` has no cost parameter and no non-spending "would this be allowed"
+- [x] **`gate_active` has no cost parameter and no non-spending "would this be allowed"
       check**, so a module cannot price an expensive verb differently or pre-filter a seed
       list without writing a REFUSE record per seed. A 10-port scan costs 10 flat units.
-- [ ] **Invariants I10–I12 are unimplemented** (`invariants.py` covers I1, I3–I9).
+- [x] **Invariants I10–I12 are unimplemented** (`invariants.py` covers I1, I3–I9).
       Missing: I10 verb-on-dispatch, I11 contradictions-fork, I12 stale-snapshot-blocks.
       I10/I12 are enforced at runtime in the loop but not checked over the data.
-- [ ] **Event kinds for the Hypothesis lifecycle** (`hypothesis_promoted` /
+- [x] **Event kinds for the Hypothesis lifecycle** (`hypothesis_promoted` /
       `hypothesis_decayed`), so promotion of a candidate to a confirmed node is auditable
       from the log alone rather than inferred from `node_upserted` + a `corroborates` edge.
-- [ ] **Stale id comment** in `schema/ontology.json`: `Hypothesis` is documented as
+- [x] **Stale id comment** in `schema/ontology.json`: `Hypothesis` is documented as
       `hyp:<uuid>` but the code requires the structured `hyp:dns-candidate:<fqdn>` form.
+
+### P1 remainder
+
+- [ ] **Migrate the modules onto `recon/urls.py`.** The canonicalizer, the ported
+      `web:` id and the location-qualified `param:` id now exist and are tested, but the
+      11 modules still build ids with their own local helpers. Until they are migrated the
+      duplication remains and `openapi_discovery` still skips a ported seed. Mechanical
+      but touches every module and its tests, so it wants its own pass.
+- [ ] **Promote `same_as` / `co_deploy` / `shared_trust_domain`** when entity resolution
+      is built (they are still correctly listed as proposed-only).
 
 ## P2 — breadth: domains specced but not yet built
 

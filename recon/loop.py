@@ -138,6 +138,7 @@ class AutonomousLoop:
             violations = invariants.check(
                 self.store, ledger=self.ctx.ledger,
                 current_snapshot=self.ctx.snapshot.snapshot_id,
+                log=self.ctx.graph.log, snapshot=self.ctx.snapshot,
             )
             if violations:
                 result.violations = violations
