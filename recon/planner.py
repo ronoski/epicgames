@@ -122,6 +122,11 @@ RULES: list[Rule] = [
     Rule("confirm-candidate", "Hypothesis", "resolver", "resolve", False, 2.0, 1.0, _is_dns_candidate),
     Rule("resolve-name", "DNSName", "resolver", "resolve", False, 4.0, 1.0, _unresolved),
     Rule("scan-host", "Host", "port_scan", "port-scan", False, 2.0, 3.0, _no_service),
+    # Email posture is attack surface web recon never sees, and it is one cheap query
+    # set per apex rather than per host.
+    Rule("email-posture", "Domain", "email_posture", "resolve", False, 3.5, 1.0,
+         lambda n, s: not s.has_out_edge(n.id, "authenticates_with")
+         and not n.attrs.get("email_assessed")),
     Rule("probe-http", "DNSName", "http_probe", "http-HEAD", False, 4.0, 1.5, _no_webapp),
     Rule("tls-fingerprint", "WebApp", "tls_probe", "tls-handshake", False, 3.0, 1.5,
          _not_fingerprinted),

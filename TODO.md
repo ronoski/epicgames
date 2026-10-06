@@ -110,12 +110,13 @@ first.
       since last run is the headline, not the totals. The event log already supports it.
 - [x] **`recon replay`** — rebuild the graph projection from the event log (proves the
       event-sourcing claim end to end).
-- [ ] **`js_analysis`** — endpoint + secret extraction from stored JS/sourcemap evidence
-      (operates offline over the evidence store).
-- [ ] **Correlation / entity resolution** — JARM / favicon / 404-body / response-hash
+- [ ] **`js_analysis`** — endpoint + secret extraction from stored JS/sourcemap evidence.
+      **Blocked on collection:** nothing currently fetches JS bodies (`http_probe` stores
+      only headers), so this needs a `js_fetch` active module first or it has no input.
+- [x] **Correlation / entity resolution** — JARM / favicon / 404-body / response-hash
       clustering to collapse identifiers into one logical service (needs the `same_as`
       proposed edge promoted first).
-- [ ] **Email security** — SPF/DKIM/DMARC/MTA-STS posture per domain, MX/dangling
+- [x] **Email security** — SPF/DKIM/DMARC/MTA-STS posture per domain, MX/dangling
       takeover candidates (passive).
 - [ ] **Cloud & SaaS footprint** — bucket discovery with **read-only** listing, serverless
       / API-gateway URLs, SaaS tenant attribution (most third-party SaaS is out of scope →
@@ -127,7 +128,7 @@ first.
 - [ ] **Real-time protocol surface** — XMPP party/presence, WebSocket, matchmaking, EOS
       P2P/relay. Flagged as missing by the non-binary review; `openapi`/`graphql` cover
       only request/response.
-- [ ] **Mobile associated domains** — `apple-app-site-association` and
+- [x] **Mobile associated domains** — `apple-app-site-association` and
       `/.well-known/assetlinks.json` for deep-link trust mapping.
 - [ ] **Binary-RE domain** — per [`docs/domains/binary-re.md`](docs/domains/binary-re.md).
       Large, and **gated behind the P0 legal-authorization question** plus implementing
