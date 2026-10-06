@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://epicgames-recon/schema/node.schema.json",
+  "title": "Graph node / edge envelope",
+  "description": "Every node AND edge carries this per-datum calculus. See docs/SPEC.md section 3.",
+  "type": "object",
+  "required": ["id", "type", "provenance", "confidence", "temporal", "scope_binding"],
+  "properties": {
+    "id": { "type": "string", "description": "Deterministic content-derived id, 'type:<canonical>'" },
+    "type": { "type": "string", "description": "A node or edge type from schema/ontology.json" },
+    "kind": { "enum": ["node", "edge"] },
+    "attrs": { "type": "object", "description": "Type-specific attributes" },
+    "endpoints": {
+      "type": "object",
+      "description": "For edges only",
+      "properties": { "from": { "type": "string" }, "to": { "type": "string" } }
+    },
+    "provenance": {
+      "type": "object",
+      "description": "W3C-PROV derivation DAG: evidence -> activity -> rule -> fact",
+      "required": ["chain"],
+      "properties": {
+        "chain": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["evidence_id", "tool", "tool_version", "rule_id", "rule_version"],
+            "properties": {
+              "evidence_id": { "type": "string" },
+              "tool": { "type": "string" },
+              "tool_version": { "type": "string" },
+              "config_hash": { "type": "string" },
+              "rule_id": { "type": "string" },
+              "rule_version": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "required": ["log_odds", "state"],
+      "properties": {
+        "log_odds": { "type": "number", "description": "Calibrated; combined across independent sources" },
+        "state": { "enum": ["observed", "corroborated", "verified"] },
+        "independent_sources": { "type": "integer", "minimum": 1 },
+        "penalties": {
+          "type": "array",
+          "description": "Additive log-odds deltas (e.g. obfuscation re_feasibility). NOT probability multipliers.",
+          "items": { "type": "object", "properties": { "reason": { "type": "string" }, "logodds_delta": { "type": "number" } } }
+        },
+        "forked_from": { "type": "string", "description": "Set when this node is a contradiction fork" }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sha256"],
+        "properties": {
+          "sha256": { "type": "string" },
+          "region": { "type": "string", "description": "byte_offset,len | symbol | class.method | proto_message,field | manifest_xpath | request_response_hash" },
+          "encrypted_at_rest": { "type": "boolean", "default": true }
+        }
+      }
+    },
+    "temporal": {
+      "type": "object",
+      "required": ["first_seen", "last_seen", "last_verified", "decay_half_life"],
+      "properties": {
+        "first_seen": { "type": "string", "format": "date-time" },
+        "last_seen": { "type": "string", "format": "date-time" },
+        "last_verified": { "type": "string", "format": "date-time" },
+        "decay_half_life": { "type": "string", "description": "ISO-8601 duration; per fact class" }
+      }
+    },
+    "scope_binding": {
+      "type": "object",
+      "required": ["verdict", "snapshot_id", "observed_at"],
+      "properties": {
+        "verdict": { "enum": ["in_scope", "out_of_scope", "prefilter_only", "adjudication_pending"] },
+        "rule_matched": { "type": "string", "description": "The exact include/exclude rule" },
+        "snapshot_id": { "type": "string", "description": "Content hash of the policy snapshot at observation time" },
+        "observed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "sensitivity": { "enum": ["S0", "S1", "S2", "S3", "S4"], "description": "See docs/safety-model.md section 5" },
+    "coverage": {
+      "type": "object",
+      "description": "Per-entity coverage signals (weighted booleans). See docs/SPEC.md section 4.2",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "data_subject": { "enum": ["self", "other", "none"], "description": "non-self is hash-redacted at ingest (safety-model section 6)" }
+  }
+}

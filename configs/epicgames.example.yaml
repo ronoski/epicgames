@@ -1,0 +1,51 @@
+# Example scope configuration — SKELETON ONLY.
+#
+# ⚠️  You MUST populate `scope.include` / `scope.exclude` from the LIVE policy at
+#     https://hackerone.com/epicgames/policy_scopes before any run. Scopes change; an asset being
+#     Epic-owned is NOT the same as being in scope (see docs/safety-model.md §2). Values below are
+#     placeholders to show structure, not an authorization to test them.
+#
+# Validates against schema/scope.schema.json (config section).
+
+scope:
+  # Default-deny: nothing is touched unless it matches an include rule AND no exclude rule.
+  include:
+    # - "*.epicgames.com"        # verify against live policy before enabling
+    # - "*.epicgames.dev"        # verify
+    # - "*.fortnite.com"         # verify
+    # - "*.unrealengine.com"     # verify
+    # - "fab.com"                # verify — Epic's unified marketplace
+    # - "artstation.com"         # verify — acquisition apex
+    # - "sketchfab.com"          # verify
+    # - "rocketleague.com"       # verify
+    # - "fallguys.com"           # verify
+    []                            # <-- replace with the real, verified in-scope list
+  exclude:
+    # Known traps and anything the program lists out of scope:
+    # - "bandcamp.com"           # divested to Songtradr (Oct 2023) — out
+    # - "*.epic.com"             # Epic Systems (healthcare) is a different company — out
+    []
+  wildcard_includes_apex: true
+  notes: >
+    Fill from the live hackerone.com/epicgames policy. Capture both the policy markdown and the
+    structured_scopes; most-restrictive wins. Confirm whether the program is public or invite-only.
+
+# --- operational knobs (all conservative / non-intrusive by default) ---
+# A SINGLE unified per-target rate ledger governs every active verb (see docs/safety-model.md §4).
+rate:
+  global_qps_ceiling: 2.0        # hard ceiling across ALL domains for one target
+  per_target_concurrency: 1      # serialize active touches per target
+  backoff_on_status: [403, 429]  # back off; never evade
+
+passive_first: true              # exhaust passive/OSINT before any active touch
+
+# Verbs the loop may schedule are the closed whitelist in docs/safety-model.md §3.
+# Volume-probe verbs (graphql field-suggestion, response-diff param mining, content wordlists)
+# are human-gated and never auto-run.
+human_gated_verbs:
+  - graphql-field-suggestion
+  - response-diff-param-mining
+  - content-discovery-wordlist
+
+# Live credential use is default-deny; discovered client_ids stay static mapping facts.
+allow_live_credential_use: false
