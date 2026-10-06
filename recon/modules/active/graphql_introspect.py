@@ -86,7 +86,11 @@ from ... import verbs
 from ...evidence import redact
 from ...factory import make_edge, make_node
 from ...models import EvidenceRef, ScopeBinding, Sensitivity, Verdict
-from ...scope import classify, normalize_host
+from ...urls import (
+    authority as make_authority, canonical_host, operation_id, parameter_id,
+    route_id as make_route_id, webapp_id as make_webapp_id,
+)
+from ...scope import classify
 from ..base import GateRefused, Module, ModuleContext, register
 
 #: The only verb this module spends, and the verb ``planner.RULES`` names for the
@@ -180,11 +184,6 @@ _SECRET_SHAPED_RE = re.compile(
 )
 
 
-def authority_of(host: str) -> str:
-    """URL authority for ``host``: an IPv6 literal is bracketed, anything else is itself."""
-
-    return f"[{host}]" if ":" in host else host
-
 
 @dataclass(frozen=True)
 class _Target:
@@ -222,19 +221,19 @@ def parse_webapp(raw: str) -> _Target | None:
         literal, bracket, trailing = authority[1:].partition("]")
         if not bracket or trailing:  # unterminated, or an explicit :port after the bracket
             return None
-        host = normalize_host(literal)
+        host = canonical_host(literal)
     else:
         if ":" in authority:
             return None  # explicit port: see the docstring
-        host = normalize_host(authority)
+        host = canonical_host(authority)
     if not host or len(host) > 253:
         return None
     if classify(host) != "ip" and not _FQDN_RE.match(host):
         return None
     return _Target(
-        webapp_id=f"web:{scheme}://{authority_of(host)}",
+        webapp_id=make_webapp_id(scheme, host),
         scheme=scheme,
-        authority=authority_of(host),
+        authority=make_authority(host),
         host=host,
     )
 
@@ -660,7 +659,7 @@ class GraphqlIntrospectModule(Module):
         recovered = _Schema(
             target=target,
             url=answer.url,
-            route_id=f"route:{target.webapp_id}{answer.path}",
+            route_id=make_route_id(target.webapp_id, answer.path),
             schema=schema,
             binding=answer.binding,
             now=self.ctx.clock_now(),
@@ -745,7 +744,7 @@ class GraphqlIntrospectModule(Module):
                         summary: dict) -> None:
         """Emit one root field as an ``Operation`` — mapped, never executed."""
 
-        op_id = f"op:POST:{recovered.route_id}#{name}"
+        op_id = operation_id("POST", recovered.route_id, field=name)
         returns = named_type(declared.get("type"))
         self.ctx.graph.upsert_node(make_node(
             "Operation", op_id,
@@ -809,7 +808,7 @@ class GraphqlIntrospectModule(Module):
                 self._drop_secret_shaped("argument name", name, summary)
                 continue
             seen.add(name)
-            param_id = f"param:{op_id}#{name}"
+            param_id = parameter_id(op_id, name, "arg")
             self.ctx.graph.upsert_node(make_node(
                 "Parameter", param_id,
                 binding=recovered.binding,

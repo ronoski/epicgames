@@ -156,8 +156,8 @@ def test_emits_operations_object_types_and_parameters(tmp_path, monkeypatch):
     # declared types become ObjectTypes; introspection types are skipped
     assert "obj:Account" in ids
     assert not any(i.startswith("obj:__") for i in ids)
-    # declared args become Parameters
-    assert any(i.startswith("param:") and i.endswith("#id") for i in ids)
+    # declared args become Parameters, with the location-qualified id grammar
+    assert any(i.startswith("param:") and i.endswith("#arg:id") for i in ids)
 
 
 def test_mutation_is_mapped_but_never_executed(tmp_path, monkeypatch):

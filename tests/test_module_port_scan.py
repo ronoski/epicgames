@@ -184,9 +184,9 @@ def spy_gate(ctx, trace: list) -> None:
 
     original = ctx.gate_active
 
-    def gate_active(value, verb):
+    def gate_active(value, verb, **kwargs):
         try:
-            binding = original(value, verb)
+            binding = original(value, verb, **kwargs)
         except Exception:
             trace.append(("refused", value))
             raise
@@ -432,7 +432,8 @@ def test_module_cannot_probe_by_swallowing_a_refusal(tmp_path, monkeypatch):
     calls = install(monkeypatch, {IP: {80: "open"}})
     monkeypatch.setattr(
         ctx, "gate_active",
-        lambda value, verb: (_ for _ in ()).throw(GateRefused("synthetic refusal")),
+        lambda value, verb, **kwargs: (_ for _ in ()).throw(
+            GateRefused("synthetic refusal")),
     )
 
     summary = port_scan.PortScanModule(ctx).run([host(IP), host(OTHER_IP)])
@@ -952,3 +953,35 @@ def test_planner_schedules_this_module_and_the_scan_closes_the_gap(tmp_path, mon
     assert summary["open"] == 1 and summary["hosted_on_edges"] == 1
     assert not [g for g in planner.plan(ctx.graph.store, NOW, allow_active=True)
                 if g.module == "port_scan"]
+
+
+# --- ledger keying: never charge a bare shared IP ------------------------------
+
+
+def test_scan_is_charged_to_the_owning_target_not_the_bare_ip(tmp_path, monkeypatch):
+    """safety-model.md §4 forbids keying the ledger by a shared IP.
+
+    One CDN address fronts many tenants, so charging the address under-counts aggregate
+    spend against the logical target and charges a shared IP to nobody.
+    """
+
+    ctx = make_ctx(tmp_path)
+    install(monkeypatch, {IP: {80: "open"}})
+    seed = host(IP)
+    seed.attrs["fqdn"] = "api.epicgames.com"
+
+    port_scan.PortScanModule(ctx).run([seed])
+
+    assert ctx.ledger.log, "the scan should have spent budget"
+    charged = {e.target for e in ctx.ledger.log}
+    assert charged == {"epicgames.com"}, f"charged {charged}, expected the owning target"
+    assert IP not in charged
+
+
+def test_falls_back_to_the_address_when_no_owner_is_known(tmp_path, monkeypatch):
+    ctx = make_ctx(tmp_path)
+    install(monkeypatch, {IP: {80: "open"}})
+
+    port_scan.PortScanModule(ctx).run([host(IP)])
+
+    assert {e.target for e in ctx.ledger.log} == {IP}

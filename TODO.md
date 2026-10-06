@@ -78,11 +78,9 @@ correctness risk.
 
 ### P1 remainder
 
-- [ ] **Migrate the modules onto `recon/urls.py`.** The canonicalizer, the ported
-      `web:` id and the location-qualified `param:` id now exist and are tested, but the
-      11 modules still build ids with their own local helpers. Until they are migrated the
-      duplication remains and `openapi_discovery` still skips a ported seed. Mechanical
-      but touches every module and its tests, so it wants its own pass.
+- [x] **Migrate the modules onto `recon/urls.py`.** All 11 migrated; a static guard
+      (`tests/test_urls_adoption.py`) now fails if a module re-grows a local canonicalizer
+      or hand-builds an id, so the duplication cannot come back.
 - [ ] **Promote `same_as` / `co_deploy` / `shared_trust_domain`** when entity resolution
       is built (they are still correctly listed as proposed-only).
 

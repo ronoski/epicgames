@@ -65,7 +65,11 @@ from dataclasses import dataclass, field
 from ... import verbs
 from ...factory import make_edge, make_node
 from ...models import EvidenceRef, Sensitivity, Verdict
-from ...scope import classify, normalize_host
+from ...scope import classify
+from ...urls import (
+    canonical_host, dns_id as make_dns_id, host_id as make_host_id,
+    hypothesis_id, valid_fqdn,
+)
 from ..base import GateRefused, Module, ModuleContext, register
 
 #: The whitelisted verb for this module. It is an **active** verb (``verbs.ACTIVE``): every
@@ -93,8 +97,8 @@ DANGLING_LOG_ODDS = -0.5
 #: Node-id conventions this module reads and writes.
 DNS_ID_PREFIX = "dns:"
 HOST_ID_PREFIX = "host:"
-CANDIDATE_ID_PREFIX = "hyp:dns-candidate:"
-DANGLING_ID_PREFIX = "hyp:dangling-cname:"
+CANDIDATE_ID_PREFIX = hypothesis_id("dns-candidate", "")
+DANGLING_ID_PREFIX = hypothesis_id("dangling-cname", "")
 
 #: Node types accepted as seeds; anything else is ignored. A ``Hypothesis`` seed must be a
 #: ``hyp:dns-candidate:`` node — no other hypothesis kind describes a resolvable name.
@@ -137,15 +141,6 @@ NXDOMAIN_ERRNOS = _errnos("EAI_NONAME")
 NO_ADDRESS_ERRNOS = _errnos("EAI_NODATA", "EAI_ADDRFAMILY")
 
 
-def valid_fqdn(host: str) -> bool:
-    """Is ``host`` a plausible, canonical hostname we would mint a node id for?"""
-
-    if not host or len(host) > 253 or not _FQDN_RE.match(host):
-        return False
-    if any(len(label) > 63 for label in host.split(".")):
-        return False
-    return classify(host) != "ip"
-
 
 def canonical_addresses(raw, limit: int = MAX_ADDRESSES_PER_NAME) -> list[str]:
     """Validated, deduplicated, deterministically ordered addresses from an answer.
@@ -178,7 +173,7 @@ def alias_names(fqdn: str, canonical: str, aliases, limit: int = MAX_ALIASES_PER
 
     out: list[str] = []
     for item in [canonical, *(aliases or [])]:
-        host = normalize_host(str(item or ""))
+        host = canonical_host(str(item or ""))
         if not host or host == fqdn or host in out or not valid_fqdn(host):
             continue
         out.append(host)
@@ -360,7 +355,7 @@ class ResolverModule(Module):
         else:
             value = raw  # a bare hostname handed over by the orchestrator
 
-        fqdn = normalize_host(str(value).lstrip("*."))
+        fqdn = canonical_host(str(value).lstrip("*."))
         if not valid_fqdn(fqdn):
             return None
         return _Target(fqdn=fqdn, seed_id=raw, candidate=candidate, seed_attrs=attrs)
@@ -420,7 +415,7 @@ class ResolverModule(Module):
 
         evidence = self._evidence(self._record(
             target.fqdn, result="OK",
-            canonical=normalize_host(str(canonical or "")) or target.fqdn,
+            canonical=canonical_host(str(canonical or "")) or target.fqdn,
             aliases=aliases, addresses=addresses,
         ), target.fqdn)
 
@@ -430,7 +425,7 @@ class ResolverModule(Module):
         dns_attrs: dict = {"active_probed": True}
         if aliases:
             dns_attrs["cname_targets"] = list(aliases)
-        dns_id = f"{DNS_ID_PREFIX}{target.fqdn}"
+        dns_id = make_dns_id(target.fqdn)
         self.ctx.graph.upsert_node(make_node(
             "DNSName", dns_id,
             binding=binding,  # the gate's own binding: in_scope, bound to this snapshot
@@ -502,7 +497,7 @@ class ResolverModule(Module):
                               ip, target.fqdn, verdict, ip_binding.rule_matched)
                 continue
 
-            host_id = f"{HOST_ID_PREFIX}{ip}"
+            host_id = make_host_id(ip)
             self.ctx.graph.upsert_node(make_node(
                 "Host", host_id,
                 binding=ip_binding,
@@ -550,7 +545,7 @@ class ResolverModule(Module):
                               alias_binding.rule_matched)
                 continue
 
-            alias_id = f"{DNS_ID_PREFIX}{alias}"
+            alias_id = make_dns_id(alias)
             self.ctx.graph.upsert_node(make_node(
                 "DNSName", alias_id,
                 binding=alias_binding,
@@ -623,11 +618,11 @@ class ResolverModule(Module):
         """
 
         out: list[str] = []
-        for edge in self.ctx.graph.store.out_edges(f"{DNS_ID_PREFIX}{target.fqdn}", "cname_to"):
+        for edge in self.ctx.graph.store.out_edges(make_dns_id(target.fqdn), "cname_to"):
             host = str(getattr(edge, "to", "") or "")
             if host.startswith(DNS_ID_PREFIX):
                 host = host[len(DNS_ID_PREFIX):]
-            host = normalize_host(host)
+            host = canonical_host(host)
             if valid_fqdn(host) and host not in out:
                 out.append(host)
 
@@ -636,7 +631,7 @@ class ResolverModule(Module):
             raw = [raw]
         if isinstance(raw, (list, tuple)):
             for item in raw:
-                host = normalize_host(str(item or ""))
+                host = canonical_host(str(item or ""))
                 if valid_fqdn(host) and host not in out:
                     out.append(host)
         return tuple(sorted(out))
@@ -650,7 +645,7 @@ class ResolverModule(Module):
         touch. Confirming the lead means a human reading the report, not a probe.
         """
 
-        node_id = f"{DANGLING_ID_PREFIX}{target.fqdn}"
+        node_id = hypothesis_id("dangling-cname", target.fqdn)
         evidence = self._evidence(self._record(
             target.fqdn, result="NXDOMAIN", cnames=cnames,
         ), target.fqdn)

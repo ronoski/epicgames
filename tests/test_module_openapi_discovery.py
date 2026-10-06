@@ -30,6 +30,26 @@ from recon.scope import Scope
 from recon.snapshot import take_snapshot
 from recon.store import Graph
 
+
+def param_name(param_id: str) -> str:
+    """The bare parameter name from a location-qualified id."""
+
+    return param_id.rsplit(":", 1)[1]
+
+
+def find_param(ctx, op_id: str, name: str):
+    """The Parameter node for ``name`` on ``op_id``, whatever location it was declared in.
+
+    Parameter ids are location-qualified now (``param:<op>#<location>:<name>``), so tests
+    look the node up by what they actually care about instead of hard-coding the spelling.
+    """
+
+    prefix = f"param:{op_id}#"
+    for node in ctx.graph.store.iter_type("Parameter"):
+        if node.id.startswith(prefix) and node.id.rsplit(":", 1)[-1] == name:
+            return node
+    return None
+
 NOW = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 HOST = "api.epicgames.com"
@@ -520,7 +540,7 @@ def test_path_query_and_header_parameters_are_typed(tmp_path, monkeypatch):
     ctx, summary, _ = run(tmp_path, monkeypatch, [webapp()], served(OPENAPI3))
 
     def param(op_id: str, name: str):
-        return ctx.graph.store.get(f"param:{op_id}#{name}")
+        return find_param(ctx, op_id, name)
 
     account_id = param(ACCOUNT_GET, "accountId")
     assert account_id is not None and account_id.type == "Parameter"
@@ -541,7 +561,7 @@ def test_path_query_and_header_parameters_are_typed(tmp_path, monkeypatch):
 
     takes = ctx.graph.store.out_edges(ACCOUNT_GET, "takes")
     assert sorted(e.to for e in takes) == sorted(
-        f"param:{ACCOUNT_GET}#{n}"
+        find_param(ctx, ACCOUNT_GET, n).id
         for n in ("accountId", "includeExternalAuths", "X-Epic-Correlation-ID"))
     assert takes[0].attrs == {"active_probed": True}
 
@@ -549,8 +569,8 @@ def test_path_query_and_header_parameters_are_typed(tmp_path, monkeypatch):
 def test_path_item_parameters_are_inherited_by_every_operation(tmp_path, monkeypatch):
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(OPENAPI3))
 
-    assert ctx.graph.store.get(f"param:{ACCOUNT_POST}#accountId") is not None
-    assert ctx.graph.store.get(f"param:{ACCOUNT_GET}#accountId") is not None
+    assert find_param(ctx, ACCOUNT_POST, "accountId") is not None
+    assert find_param(ctx, ACCOUNT_GET, "accountId") is not None
 
 
 def test_operation_level_parameter_overrides_the_path_item_one(tmp_path, monkeypatch):
@@ -563,23 +583,23 @@ def test_operation_level_parameter_overrides_the_path_item_one(tmp_path, monkeyp
     ctx, summary, _ = run(tmp_path, monkeypatch, [webapp()], served(doc))
 
     op_id = f"op:GET:route:{WEBAPP}/v1/x/{{id}}"
-    assert ctx.graph.store.get(f"param:{op_id}#id").attrs["type"] == "integer"
+    assert find_param(ctx, op_id, "id").attrs["type"] == "integer"
     assert summary["parameters"] == 1  # recorded once, not forked on an id collision
 
 
 def test_request_body_properties_become_parameters(tmp_path, monkeypatch):
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(OPENAPI3))
 
-    display = ctx.graph.store.get(f"param:{ACCOUNT_POST}#displayName")
+    display = find_param(ctx, ACCOUNT_POST, "displayName")
     assert display.attrs == {
         "active_probed": True, "name": "displayName", "in": "body",
         "type": "string", "required": True,  # from the schema's required[] list
     }
-    language = ctx.graph.store.get(f"param:{ACCOUNT_POST}#preferredLanguage")
+    language = find_param(ctx, ACCOUNT_POST, "preferredLanguage")
     assert language.attrs["required"] is False
     assert language.attrs["enum"] == ["en", "fr"]
     # application/xml describes the same body: one parameter set, not duplicates
-    assert sorted(e.to.rsplit("#", 1)[1]
+    assert sorted(e.to.rsplit(":", 1)[1]
                   for e in ctx.graph.store.out_edges(ACCOUNT_POST, "takes")) == [
         "accountId", "displayName", "preferredLanguage",
     ]
@@ -588,7 +608,7 @@ def test_request_body_properties_become_parameters(tmp_path, monkeypatch):
 def test_declared_enum_is_recorded(tmp_path, monkeypatch):
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(OPENAPI3))
 
-    grant = ctx.graph.store.get(f"param:{TOKEN_POST}#grant_type")
+    grant = find_param(ctx, TOKEN_POST, "grant_type")
     assert grant.attrs["enum"] == ["client_credentials", "device_code"]
     assert grant.attrs["required"] is True
 
@@ -602,7 +622,7 @@ def test_required_is_what_the_document_declares(tmp_path, monkeypatch):
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(doc))
 
     op_id = f"op:GET:route:{WEBAPP}/v1/x/{{id}}"
-    assert ctx.graph.store.get(f"param:{op_id}#id").attrs["required"] is False
+    assert find_param(ctx, op_id, "id").attrs["required"] is False
 
 
 def test_swagger2_body_parameter_is_expanded_into_properties(tmp_path, monkeypatch):
@@ -631,13 +651,13 @@ def test_swagger2_body_parameter_is_expanded_into_properties(tmp_path, monkeypat
 
     op = ctx.graph.store.get(TOKEN_POST)
     assert op.attrs["spec_version"] == "2.0"
-    names = {e.to.rsplit("#", 1)[1] for e in ctx.graph.store.out_edges(TOKEN_POST, "takes")}
+    names = {e.to.rsplit(":", 1)[1] for e in ctx.graph.store.out_edges(TOKEN_POST, "takes")}
     assert names == {"grant_type", "deployment_id", "token_type"}
-    assert ctx.graph.store.get(f"param:{TOKEN_POST}#grant_type").attrs == {
+    assert find_param(ctx, TOKEN_POST, "grant_type").attrs == {
         "active_probed": True, "name": "grant_type", "in": "body",
         "type": "string", "required": True, "enum": ["client_credentials"],
     }
-    assert ctx.graph.store.get(f"param:{TOKEN_POST}#token_type").attrs["in"] == "formData"
+    assert find_param(ctx, TOKEN_POST, "token_type").attrs["in"] == "formData"
     assert summary["parameters"] == 3
 
 
@@ -648,7 +668,7 @@ def test_swagger2_scalar_body_stays_a_single_parameter(tmp_path, monkeypatch):
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(doc))
 
     op_id = f"op:PUT:route:{WEBAPP}/v1/raw"
-    assert ctx.graph.store.get(f"param:{op_id}#payload").attrs["type"] == "string"
+    assert find_param(ctx, op_id, "payload").attrs["type"] == "string"
 
 
 # --- $ref handling -------------------------------------------------------------
@@ -664,7 +684,7 @@ def test_an_external_ref_is_never_fetched(tmp_path, monkeypatch):
 
     assert [c["url"] for c in requests_made(calls)] == [SPEC_URL]  # one GET, no ref fetch
     op_id = f"op:GET:route:{WEBAPP}/v1/x"
-    assert {e.to.rsplit("#", 1)[1]
+    assert {e.to.rsplit(":", 1)[1]
             for e in ctx.graph.store.out_edges(op_id, "takes")} == {"kept"}
     assert summary["refs_unresolved"] == 2
     assert summary["parameters"] == 1
@@ -722,7 +742,7 @@ def test_a_secret_shaped_enum_label_is_redacted_before_storage(tmp_path, monkeyp
     ]}}})
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(doc))
 
-    node = ctx.graph.store.get(f"param:op:GET:route:{WEBAPP}/v1/x#token")
+    node = find_param(ctx, f"op:GET:route:{WEBAPP}/v1/x", "token")
     assert node.attrs["enum"] == [redact(value)]
     assert value not in repr(node.to_dict())
 
@@ -733,7 +753,7 @@ def test_an_ordinary_enum_label_is_kept_verbatim(tmp_path, monkeypatch):
     ]}}})
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(doc))
 
-    node = ctx.graph.store.get(f"param:op:GET:route:{WEBAPP}/v1/x#locale")
+    node = find_param(ctx, f"op:GET:route:{WEBAPP}/v1/x", "locale")
     assert node.attrs["enum"] == ["en-US", "fr", "7", "True", "null"]
 
 
@@ -760,7 +780,7 @@ def test_enum_values_are_capped(tmp_path, monkeypatch):
     ]}}})
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()], served(doc))
 
-    assert ctx.graph.store.get(f"param:op:GET:route:{WEBAPP}/v1/x#n").attrs["enum"] == [
+    assert find_param(ctx, f"op:GET:route:{WEBAPP}/v1/x", "n").attrs["enum"] == [
         "0", "1", "2",
     ]
 
@@ -1150,7 +1170,7 @@ def test_parse_webapp_rejects_unusable_ids(raw):
     ("https://x/y", ""), (None, ""), (7, ""),
 ])
 def test_path_template_normalization(raw, expected):
-    assert mod.path_template(raw) == expected
+    assert mod.declared_path_template(raw) == expected
 
 
 @pytest.mark.parametrize("raw, expected", [

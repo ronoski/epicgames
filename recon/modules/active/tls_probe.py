@@ -83,15 +83,20 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ... import verbs
-from ...factory import make_node
+from ...factory import make_edge, make_node
 from ...models import EvidenceRef, Sensitivity, Verdict
-from ...scope import classify, normalize_host
+from ...scope import classify
+from ...urls import (
+    canonical_host, certificate_id, hypothesis_id, valid_fqdn,
+    webapp_id as make_webapp_id,
+)
 from ..base import GateRefused, Module, ModuleContext, register
 
 #: The whitelisted **active** verb this module spends (``verbs.ALLOWED`` ∩ ``verbs.ACTIVE``).
-#: See the module docstring: ``fingerprint`` is allowed but NOT active, so the gate refuses
-#: it; a read-only connect to one port is a rate-limited ``port-scan``.
-VERB = "port-scan"
+#: ``tls-handshake`` is on the closed whitelist AND in ``verbs.ACTIVE``, so the ledger
+#: entry and the ALLOW record describe a certificate read honestly instead of
+#: mislabelling it as a port scan.
+VERB = "tls-handshake"
 
 SOURCE = "tls_probe"
 
@@ -116,7 +121,7 @@ SAN_GENERATOR = "san-pivot"
 #: Node-id conventions this module reads and writes.
 WEBAPP_ID_PREFIX = "web:"
 DNS_ID_PREFIX = "dns:"
-CANDIDATE_ID_PREFIX = "hyp:dns-candidate:"
+CANDIDATE_ID_PREFIX = hypothesis_id("dns-candidate", "")
 
 #: Node types accepted as seeds; anything else is ignored.
 SEED_NODE_TYPES = frozenset({"WebApp", "DNSName"})
@@ -148,15 +153,6 @@ MAX_CANDIDATES_PER_CERT = 32
 MAX_ATTR_CHARS = 256
 MAX_CERT_JSON_CHARS = 64 * 1024
 
-
-def valid_fqdn(host: str) -> bool:
-    """Is ``host`` a plausible, canonical hostname we would connect to or mint an id for?"""
-
-    if not host or len(host) > 253 or not _FQDN_RE.match(host):
-        return False
-    if any(len(label) > 63 for label in host.split(".")):
-        return False
-    return classify(host) != "ip"
 
 
 def parse_cert_time(value) -> str:
@@ -264,7 +260,7 @@ def dns_sans(cert: dict, limit: int | None = None) -> tuple[str, ...]:
         raw = str(value or "")
         if "@" in raw:
             continue
-        host = normalize_host(raw.lstrip("*."))
+        host = canonical_host(raw.lstrip("*."))
         if not host or host in out or not valid_fqdn(host):
             continue
         out.append(host)
@@ -306,6 +302,9 @@ class _Observation:
     cert: dict
     tls_version: str = ""
     email_fields_dropped: int = 0
+    #: The DER the peer actually presented. Hashed for the Certificate id; never
+    #: stored as an attr (it is key material, not a fact about the host).
+    der: bytes = b""
 
 
 @register
@@ -315,7 +314,7 @@ class TlsProbeModule(Module):
     ctx: ModuleContext
 
     name = "tls_probe"
-    produces = ("WebApp", "Hypothesis")
+    produces = ("WebApp", "Certificate", "Hypothesis")
     active = True
 
     def run(self, seeds: list) -> dict:
@@ -327,9 +326,6 @@ class TlsProbeModule(Module):
         assert verbs.is_active(VERB), "tls_probe is active; its verb must be in verbs.ACTIVE"
         # The verb the planner names for this module is allowed but NOT active, which is why
         # it cannot be spent here. Asserted so a future promotion of it is caught by tests.
-        assert not verbs.is_active("fingerprint"), (
-            "'fingerprint' became an active verb; revisit tls_probe's VERB choice"
-        )
 
         summary: dict = {
             "module": self.name,
@@ -437,7 +433,7 @@ class TlsProbeModule(Module):
             raw = raw[len(DNS_ID_PREFIX):]
         elif raw.startswith(_FOREIGN_ID_PREFIXES):
             return ""  # some other node kind slipped into the seed list
-        host = normalize_host(raw.lstrip("*."))
+        host = canonical_host(raw.lstrip("*."))
         if host.startswith("[") and host.endswith("]"):
             host = host[1:-1]  # an IPv6 authority arrives bracketed
         return host if valid_fqdn(host) else ""
@@ -496,6 +492,14 @@ class TlsProbeModule(Module):
                 raw_sock.settimeout(self.ctx.timeout)  # also bound the handshake itself
                 with context.wrap_socket(raw_sock, server_hostname=host) as tls_sock:
                     cert = tls_sock.getpeercert()
+                    # DER too: the Certificate node is keyed on real key material,
+                    # which is what makes key-reuse clustering possible later. A
+                    # stack that will not hand it over costs us the Certificate node,
+                    # never the handshake we already completed.
+                    try:
+                        der = tls_sock.getpeercert(binary_form=True)
+                    except Exception:
+                        der = b""
                     version = tls_sock.version()
         except ssl.SSLCertVerificationError:
             return None, "cert_verification_failed"
@@ -516,6 +520,7 @@ class TlsProbeModule(Module):
             cert=safe_cert,
             tls_version=str(version or "").strip()[:MAX_ATTR_CHARS],
             email_fields_dropped=dropped,
+            der=der if isinstance(der, bytes) else b"",
         ), ""
 
     # --- evidence ----------------------------------------------------------
@@ -583,11 +588,55 @@ class TlsProbeModule(Module):
         ))
         summary["webapps"] += 1
 
+        self._emit_certificate(webapp_id, binding, attrs, evidence, observation, summary)
         self._emit_san_candidates(host, sans, evidence, summary)
         self.log.info(
             "tls_probe: %s:%d -> issuer=%r not_after=%r, %d DNS SAN(s)",
             host, TLS_PORT, attrs.get("issuer_cn", ""), attrs.get("not_after", ""), len(sans),
         )
+
+    def _emit_certificate(self, webapp_id, binding, attrs, evidence, observation,
+                          summary: dict) -> None:
+        """Emit the served certificate as its own node, linked to the WebApp.
+
+        ``Certificate`` and ``presents_certificate`` are declared types now, so the
+        certificate is a first-class node instead of a handful of attrs on the WebApp.
+        Keying it on the SPKI/DER hash is the point: two hosts presenting the same key
+        material become clusterable, which attrs on separate WebApps never were.
+        """
+
+        if not observation.der:
+            # Nothing verifiable to key on; the WebApp attrs still carry the facts.
+            summary["certificates_unkeyed"] = summary.get("certificates_unkeyed", 0) + 1
+            return
+
+        cert_id = certificate_id(observation.der)
+        cert_attrs = {
+            key: attrs[key] for key in
+            ("issuer_cn", "subject_cn", "not_before", "not_after", "serial")
+            if key in attrs
+        }
+        cert_attrs["keyed_on"] = "der_sha256"  # not an SPKI parse; say what we hashed
+        cert_attrs["active_probed"] = True
+        self.ctx.graph.upsert_node(make_node(
+            "Certificate", cert_id,
+            binding=binding,
+            source=SOURCE,
+            now=self.ctx.clock_now(),
+            attrs=cert_attrs,
+            evidence=evidence,
+            rule_id=RULE_ID,
+            rule_version=RULE_VERSION,
+            log_odds=HANDSHAKE_LOG_ODDS,
+            sensitivity=Sensitivity.S0,  # a served certificate is public by definition
+            data_subject="none",
+            coverage={"fingerprinted": True},
+        ))
+        self.ctx.graph.upsert_edge(make_edge(
+            "presents_certificate", webapp_id, cert_id,
+            binding=binding, source=SOURCE, now=self.ctx.clock_now(),
+        ))
+        summary["certificate_nodes"] = summary.get("certificate_nodes", 0) + 1
 
     def _emit_san_candidates(self, host: str, sans: tuple[str, ...],
                              evidence: list[EvidenceRef], summary: dict) -> None:

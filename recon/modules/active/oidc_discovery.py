@@ -99,7 +99,11 @@ from ... import verbs
 from ...evidence import redact
 from ...factory import make_edge, make_node
 from ...models import EvidenceRef, ScopeBinding, Sensitivity, Verdict
-from ...scope import classify, normalize_host
+from ...urls import (
+    authority as make_authority, canonical_host, canonical_url,
+    operation_id, route_id as make_route_id, webapp_id_from_url,
+)
+from ...scope import classify
 from ..base import GateRefused, Module, ModuleContext, register
 
 #: The whitelisted **active** verb this module spends (``verbs.ALLOWED`` ∩ ``verbs.ACTIVE``),
@@ -205,11 +209,6 @@ def _bump(counter: dict, key: str) -> None:
     counter[key] = counter.get(key, 0) + 1
 
 
-def authority(host: str) -> str:
-    """URL authority for ``host``: an IPv6 literal is bracketed, anything else is itself."""
-
-    return f"[{host}]" if ":" in host else host
-
 
 def valid_target(host: str) -> bool:
     """Is ``host`` a plausible, canonical target we would request or mint an id for?"""
@@ -244,7 +243,7 @@ def safe_url(value) -> str:
             return ""
         if parts.username or parts.password:
             return ""
-        host = normalize_host(parts.hostname or "")
+        host = canonical_host(parts.hostname or "")
         port = parts.port
     except ValueError:
         return ""  # a mangled IPv6 literal or a non-numeric port
@@ -252,7 +251,7 @@ def safe_url(value) -> str:
         return ""
     suffix = f":{port}" if port else ""
     query = f"?{parts.query}" if parts.query else ""
-    return f"{parts.scheme.lower()}://{authority(host)}{suffix}{parts.path}{query}"
+    return f"{parts.scheme.lower()}://{make_authority(host)}{suffix}{parts.path}{query}"
 
 
 @dataclass(frozen=True)
@@ -277,12 +276,12 @@ def parse_endpoint(value) -> _Endpoint | None:
         port = parts.port
     except ValueError:  # pragma: no cover - safe_url already parsed this once
         return None
-    host = normalize_host(parts.hostname or "")
+    host = canonical_host(parts.hostname or "")
     suffix = f":{port}" if port else ""
     return _Endpoint(
         url=url,
         scheme=parts.scheme.lower(),
-        authority=f"{authority(host)}{suffix}",
+        authority=f"{make_authority(host)}{suffix}",
         host=host,
         path=(parts.path or "/")[:MAX_PATH_CHARS] or "/",
     )
@@ -827,7 +826,7 @@ class OidcDiscoveryModule(Module):
 
             webapp_id = f"{WEBAPP_ID_PREFIX}{endpoint.scheme}://{endpoint.authority}"
             route_id = f"{ROUTE_ID_PREFIX}{webapp_id}{endpoint.path}"
-            op_id = f"op:{method}:{route_id}"
+            op_id = operation_id(method, route_id)
             self.ctx.graph.upsert_node(make_node(
                 "Operation", op_id,
                 binding=binding,

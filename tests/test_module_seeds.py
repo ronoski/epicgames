@@ -331,13 +331,37 @@ def test_parse_seed_is_pure_and_deterministic():
 
 # --- graph / ontology / invariants ---------------------------------------
 
-def test_emits_declared_node_types_and_no_edges(tmp_path):
+def test_emits_only_declared_node_and_edge_types(tmp_path):
     ctx, _ = run_seeds(tmp_path, ["*.epicgames.com", "api.fortnite.com",
                                   "203.0.113.5", "203.0.113.0/24"])
-    assert ctx.graph.store.edges == {}
     for node in ctx.graph.store.nodes.values():
         assert node.type in ontology.node_types()
         assert node.type in SeedsModule.produces
+    for edge in ctx.graph.store.edges.values():
+        assert edge.type in ontology.edge_types()
+
+
+def test_links_a_subdomain_to_its_registrable_domain(tmp_path):
+    """subdomain_of is now declared, so apex containment is finally expressible.
+
+    It could not be modelled before: derived_from is the only other containment edge and
+    invariant I5 requires its target to be an Artifact.
+    """
+
+    ctx, _ = run_seeds(tmp_path, ["api.fortnite.com"])
+    edges = [e for e in ctx.graph.store.edges.values() if e.type == "subdomain_of"]
+    assert len(edges) == 1
+    assert edges[0].frm == "dns:api.fortnite.com"
+    assert edges[0].to == "domain:fortnite.com"
+    # both endpoints exist, and the edge carries a real binding
+    assert ctx.graph.store.get(edges[0].frm) is not None
+    assert ctx.graph.store.get(edges[0].to) is not None
+    assert edges[0].scope_binding.snapshot_id == ctx.snapshot.snapshot_id
+
+
+def test_no_containment_edge_when_the_seed_is_already_the_apex(tmp_path):
+    ctx, _ = run_seeds(tmp_path, ["*.epicgames.com"])  # wildcard seeds the apex only
+    assert [e for e in ctx.graph.store.edges.values() if e.type == "subdomain_of"] == []
 
 
 def test_graph_passes_the_safety_invariants(tmp_path):

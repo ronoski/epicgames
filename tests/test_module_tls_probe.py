@@ -120,9 +120,11 @@ class FakeRawSocket:
 class FakeTLSSocket:
     """A completed handshake: serves one certificate and the negotiated version."""
 
-    def __init__(self, peer_cert, version: str, raw: FakeRawSocket) -> None:
+    def __init__(self, peer_cert, version: str, raw: FakeRawSocket,
+                 der: bytes | None = None) -> None:
         self._cert = peer_cert
         self._version = version
+        self._der = der
         self.raw = raw
         self.closed = False
 
@@ -135,7 +137,12 @@ class FakeTLSSocket:
 
     def getpeercert(self, binary_form: bool = False):
         if binary_form:
-            raise AssertionError("tls_probe asked for the DER certificate")
+            # The Certificate node is keyed on real key material, so the module now
+            # legitimately asks for the DER. Derive it deterministically from the
+            # parsed cert so a rotated cert yields a different id.
+            if self._der is not None:
+                return self._der
+            return repr(sorted(self._cert.items())).encode() if self._cert else b""
         return self._cert
 
     def version(self):
@@ -294,7 +301,7 @@ def test_registered_under_its_filename_and_is_active():
     assert get_module("tls_probe") is tls_probe.TlsProbeModule
     assert tls_probe.TlsProbeModule.name == "tls_probe"
     assert tls_probe.TlsProbeModule.active is True
-    assert tls_probe.TlsProbeModule.produces == ("WebApp", "Hypothesis")
+    assert tls_probe.TlsProbeModule.produces == ("WebApp", "Certificate", "Hypothesis")
 
 
 def test_verb_is_a_whitelisted_active_verb():
@@ -328,8 +335,10 @@ def test_module_imports_no_http_client():
 def test_only_declared_ontology_types_are_emitted(tmp_path, monkeypatch):
     ctx, _, _ = run(tmp_path, monkeypatch, [webapp()])
 
-    assert {n.type for n in ctx.graph.store.nodes.values()} == {"WebApp", "Hypothesis"}
-    assert ctx.graph.store.edges == {}  # this module emits no edges at all
+    assert {n.type for n in ctx.graph.store.nodes.values()} == \
+        {"WebApp", "Certificate", "Hypothesis"}
+    # The only edge is WebApp -> Certificate, now that both types are declared.
+    assert {e.type for e in ctx.graph.store.edges.values()} == {"presents_certificate"}
 
 
 # --- the handshake shape -------------------------------------------------------
@@ -347,7 +356,7 @@ def test_one_handshake_per_host_with_pinned_connection_shape(tmp_path, monkeypat
     assert handshakes[0]["server_hostname"] == HOST  # SNI is the probed vhost
     assert handshakes[0]["extra"] == {}
     assert summary["handshakes"] == 1 and summary["certificates"] == 1
-    assert summary["verb"] == "port-scan" and summary["port"] == 443
+    assert summary["verb"] == "tls-handshake" and summary["port"] == 443
 
 
 def test_verification_is_left_enabled_and_sockets_are_closed(tmp_path, monkeypatch):
@@ -395,7 +404,7 @@ def test_every_handshake_is_immediately_preceded_by_its_own_gate(tmp_path, monke
     # Strict ordering: gate first, then the socket — one gate per network touch.
     assert [c["kind"] for c in calls] == ["gate", "context", "connect", "handshake"] * 2
     assert [c["value"] for c in calls if c["kind"] == "gate"] == [HOST, "www.fortnite.com"]
-    assert {c["verb"] for c in calls if c["kind"] == "gate"} == {"port-scan"}
+    assert {c["verb"] for c in calls if c["kind"] == "gate"} == {"tls-handshake"}
     assert len(allow_records(ctx)) == 2
 
 
@@ -403,7 +412,7 @@ def test_each_handshake_debits_the_unified_ledger_once(tmp_path, monkeypatch):
     ctx, summary, calls = run(tmp_path, monkeypatch, [webapp(), dns("www.epicgames.com")])
 
     assert len(ctx.ledger.log) == len(of_kind(calls, "connect")) == 2
-    assert [e.verb for e in ctx.ledger.log] == ["port-scan", "port-scan"]
+    assert [e.verb for e in ctx.ledger.log] == ["tls-handshake", "tls-handshake"]
     assert {e.target for e in ctx.ledger.log} == {"epicgames.com"}  # keyed by registrable
     assert ctx.ledger.balance(HOST) == pytest.approx(18.0)
     assert all(e.balance_after >= 0 for e in ctx.ledger.log)
@@ -586,7 +595,12 @@ def test_no_san_is_ever_asserted_as_a_dnsname_or_connected_by_an_edge(tmp_path,
     ctx, _, calls = run(tmp_path, monkeypatch, [webapp()])
 
     assert list(ctx.graph.store.iter_type("DNSName")) == []
-    assert ctx.graph.store.edges == {}
+    # The only edge this module may draw is WebApp -> Certificate; no SAN-derived
+    # node is ever an endpoint.
+    assert {e.type for e in ctx.graph.store.edges.values()} <= {"presents_certificate"}
+    hyp_ids = {n.id for n in ctx.graph.store.iter_type("Hypothesis")}
+    for e in ctx.graph.store.edges.values():
+        assert e.frm not in hyp_ids and e.to not in hyp_ids
     assert len(of_kind(calls, "connect")) == 1  # a SAN is never probed in turn
 
 
@@ -735,7 +749,7 @@ def test_the_certificate_is_stored_as_content_addressed_evidence(tmp_path, monke
 
     safe, _ = tls_probe.sanitized_cert(cert())
     expected = "\n".join([
-        "tls_probe/0.1.0 verb=port-scan",
+        "tls_probe/0.1.0 verb=tls-handshake",
         f"host={HOST}:443",
         "tls_version=TLSv1.3",
         "dns_sans=api.epicgames.com,cdn.akamai.net,fortnite.com,"

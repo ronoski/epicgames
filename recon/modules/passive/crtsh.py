@@ -51,7 +51,8 @@ import requests
 from ...evidence import redact, sha256_bytes
 from ...factory import make_node
 from ...models import Sensitivity, Verdict
-from ...scope import classify, normalize_host, registrable_domain
+from ...scope import classify
+from ...urls import canonical_host, dns_id, registrable_domain, valid_fqdn
 from ... import verbs
 from ..base import Module, ModuleContext, register
 
@@ -59,6 +60,7 @@ from ..base import Module, ModuleContext, register
 #: literally rather than via ``params=`` so the emitted URL is exact and reviewable. Only
 #: an apex that passed :data:`_FQDN_RE` is ever interpolated, so a junk seed cannot shape
 #: the query string.
+CRTSH_HOST = "crt.sh"
 CRTSH_URL = "https://crt.sh/?q=%25.{apex}&output=json"
 
 #: Whitelisted verb for this module (``verbs.ALLOWED``, deliberately NOT in ``verbs.ACTIVE``).
@@ -80,6 +82,8 @@ _FOREIGN_ID_PREFIXES = (
 
 #: Conservative fqdn shape. Rejects emails, whitespace, leftover wildcards and raw unicode
 #: (punycode ``xn--`` labels pass), so a malformed CT row can never mint a junk node id.
+# Shape is decided by urls.valid_fqdn; this only additionally admits the underscore
+# labels that CT rows legitimately contain (_acme-challenge and friends).
 _FQDN_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?)+$")
 
 #: Email shape, matched over the *whole* raw body (``name_value`` newlines are escaped
@@ -187,6 +191,13 @@ class CrtShModule(Module):
 
         seen: set[str] = set()
         for apex in apexes:
+            # crt.sh is a THIRD-PARTY aggregator: politeness toward it comes out of the
+            # third-party budget and never debits the target's ledger (safety-model.md §4).
+            if not self.ctx.spend_third_party(CRTSH_HOST):
+                self.log.info("crtsh: third-party budget exhausted; deferring %s", apex)
+                summary["errors"].append({"apex": apex, "error": "third-party budget exhausted"})
+                summary["truncated"] = True
+                break
             summary["queried"] += 1
             body, err = self._fetch(apex)
             if err:
@@ -231,7 +242,7 @@ class CrtShModule(Module):
                     evidence_tried = True
                     ref = self._store_evidence(apex, body, summary)
 
-                node_id = f"dns:{host}"
+                node_id = dns_id(host)
                 if ref is not None and self._already_recorded(node_id, ref.sha256):
                     # Same source, same evidence sha: a replay, not a new observation.
                     summary["unchanged"] += 1
@@ -273,7 +284,7 @@ class CrtShModule(Module):
 
         out: list[str] = []
         for seed in seeds or []:
-            host = normalize_host(_strip_wildcard(self._seed_host(seed)))
+            host = canonical_host(_strip_wildcard(self._seed_host(seed)))
             if not host or classify(host) == "ip":
                 continue  # a CT identity search is a name search; raw IPs have no apex
             apex = registrable_domain(host)
@@ -405,7 +416,7 @@ class CrtShModule(Module):
                 line = line.strip()
                 if not line or "@" in line:
                     continue  # an email SAN is other-person data: do not collect it
-                host = normalize_host(_strip_wildcard(line))
+                host = canonical_host(_strip_wildcard(line))
                 if not host or len(host) > 253 or not _FQDN_RE.match(host):
                     continue
                 if classify(host) == "ip":

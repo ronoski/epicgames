@@ -68,6 +68,11 @@ from ... import verbs
 from ...evidence import redact
 from ...factory import make_edge, make_node
 from ...models import EvidenceRef, ScopeBinding, Sensitivity, Verdict
+from ...urls import (
+    authority as make_authority, canonical_host, operation_id, parameter_id,
+    route_id as make_route_id, webapp_id as make_webapp_id,
+    webapp_id_from_url,
+)
 from ...scope import classify, normalize_host
 from ..base import GateRefused, Module, ModuleContext, register
 
@@ -142,11 +147,6 @@ _SECRET_SHAPED_RE = re.compile(
 )
 
 
-def authority_of(host: str) -> str:
-    """URL authority for ``host``: an IPv6 literal is bracketed, anything else is itself."""
-
-    return f"[{host}]" if ":" in host else host
-
 
 @dataclass(frozen=True)
 class _Target:
@@ -194,9 +194,9 @@ def parse_webapp(raw: str) -> _Target | None:
     if classify(host) != "ip" and not _FQDN_RE.match(host):
         return None
     return _Target(
-        webapp_id=f"web:{scheme}://{authority_of(host)}",
+        webapp_id=make_webapp_id(scheme, host),
         scheme=scheme,
-        authority=authority_of(host),
+        authority=make_authority(host),
         host=host,
     )
 
@@ -236,8 +236,14 @@ def parse_json(text: str):
         return None
 
 
-def path_template(raw) -> str:
-    """Canonical path template for a ``paths`` key, or ``""`` if it is not one."""
+def declared_path_template(raw) -> str:
+    """Validate an OpenAPI ``paths`` key as a template, or ``""`` if it is not one.
+
+    Deliberately NOT :func:`recon.urls.path_template`: that one *derives* a template
+    from a concrete observed path by collapsing identifier segments, whereas a spec key
+    is already a template and its declared ``{accountId}`` placeholders must survive
+    verbatim. Same word, different job — hence the distinct name.
+    """
 
     if not isinstance(raw, str):
         return ""
@@ -596,12 +602,12 @@ class OpenApiDiscoveryModule(Module):
             if index >= MAX_PATHS:
                 self._truncate(summary, f"path items beyond {MAX_PATHS}")
                 return
-            template = path_template(raw_path)
+            template = declared_path_template(raw_path)
             item = self._deref(doc, raw_item)
             if not template or not isinstance(item, dict):
                 continue
             shared = param_list(item.get("parameters"))
-            route_id = f"route:{spec.target.webapp_id}{template}"
+            route_id = make_route_id(spec.target.webapp_id, template)
             route_emitted = False
             for method in HTTP_METHODS:
                 operation = self._deref(doc, item.get(method))
@@ -659,7 +665,7 @@ class OpenApiDiscoveryModule(Module):
                         operation: dict, shared: list, summary: dict) -> None:
         """One ``Operation`` per declared ``(path, method)``, plus its typed Parameters."""
 
-        op_id = f"op:{method}:{route_id}"
+        op_id = operation_id(method, route_id)
         self.ctx.graph.upsert_node(make_node(
             "Operation", op_id,
             binding=spec.binding,
@@ -704,7 +710,7 @@ class OpenApiDiscoveryModule(Module):
         }
         if record["enum"]:
             attrs["enum"] = record["enum"]
-        param_id = f"param:{op_id}#{record['name']}"
+        param_id = parameter_id(op_id, record["name"], record["in"])
         self.ctx.graph.upsert_node(make_node(
             "Parameter", param_id,
             binding=spec.binding,
@@ -730,14 +736,17 @@ class OpenApiDiscoveryModule(Module):
         """Every declared input of one operation, de-duplicated and ordered.
 
         Path-item parameters come first and an operation-level declaration of the same name
-        overrides them (OpenAPI's own precedence), then the properties of a declared request
-        body fill in names not already claimed. De-duplication is by **name alone** because
-        the pinned ``param:<op>#<name>`` id cannot distinguish a ``query`` from a ``header``
-        of the same name: recording it once is honest, where emitting twice would fork the
-        graph on an id collision.
+        AND location overrides them (OpenAPI's own precedence), then the properties of a
+        declared request body fill in slots not already claimed.
+
+        De-duplication is by ``(location, name)``. It used to be by name alone, because the
+        old ``param:<op>#<name>`` id could not tell a ``query`` from a ``header`` of the
+        same name and emitting both would have collided on one id — which the store would
+        then read as a contradiction and fork on a fact that never disagreed. The id now
+        carries the location, so both are recorded as the distinct inputs they are.
         """
 
-        records: dict[str, dict] = {}
+        records: dict[tuple[str, str], dict] = {}
         for raw in list(shared) + param_list(operation.get("parameters")):
             declared = self._deref(spec.doc, raw)
             if not isinstance(declared, dict):
@@ -750,12 +759,12 @@ class OpenApiDiscoveryModule(Module):
                 expanded = self._schema_properties(spec, schema)
                 if expanded:
                     for record in expanded:
-                        records.setdefault(record["name"], record)
+                        records.setdefault((record["in"], record["name"]), record)
                     continue
             if not name:
                 continue
             schema = schema if isinstance(schema, dict) else {}
-            records[name] = {
+            records[(location or "unknown", name)] = {
                 "name": name,
                 "in": location or "unknown",
                 "type": clean_token(schema.get("type") or declared.get("type")),

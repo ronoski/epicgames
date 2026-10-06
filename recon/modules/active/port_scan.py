@@ -59,6 +59,10 @@ from dataclasses import dataclass, field
 from ... import verbs
 from ...factory import make_edge, make_node
 from ...models import EvidenceRef, ScopeBinding, Sensitivity, Verdict
+from ...urls import (
+    canonical_host, host_id as make_host_id, registrable_domain,
+    service_id as make_service_id,
+)
 from ..base import GateRefused, Module, ModuleContext, register
 
 #: The whitelisted verb for this module. It is an **active** verb (``verbs.ACTIVE``): every
@@ -402,13 +406,31 @@ class PortScanModule(Module):
         ip = canonical_ip(str(value))
         return _Target(ip=ip, seed_id=raw, seed_attrs=attrs) if ip else None
 
+    def _ledger_key(self, target) -> str:
+        """The target the scan should be charged to, never a bare shared IP.
+
+        safety-model.md §4 requires the ledger be keyed by registrable domain / apex /
+        vhost and explicitly NOT by a shared IP: one CDN address fronts many tenants, so
+        charging the address under-counts aggregate spend against the logical target and
+        charges a shared IP to nobody. Prefer the hostname this address was reached
+        through; fall back to the address only when the graph knows of none.
+        """
+
+        recorded = target.seed_attrs.get("fqdn") or target.seed_attrs.get("resolved_from")
+        if recorded:
+            return registrable_domain(canonical_host(str(recorded)))
+        for edge in self.ctx.graph.store.in_edges(make_host_id(target.ip), "resolves_to"):
+            if edge.frm.startswith("dns:"):
+                return registrable_domain(edge.frm.split(":", 1)[1])
+        return target.ip
+
     def _shared_tenant(self, target: _Target) -> bool:
         """Is this address recorded as provider/CDN-fronted, shared-tenant space?"""
 
         if any(target.seed_attrs.get(key) for key in SHARED_TENANT_ATTRS):
             return True
         try:
-            return bool(self.ctx.graph.store.out_edges(f"{HOST_ID_PREFIX}{target.ip}",
+            return bool(self.ctx.graph.store.out_edges(make_host_id(target.ip),
                                                        "fronted_by"))
         except Exception:  # a store that cannot answer must not break the scan
             return False
@@ -425,7 +447,8 @@ class PortScanModule(Module):
             # THE CHOKEPOINT. One gate decision per probe, before the probe.
             summary["gated"] += 1
             try:
-                binding = self.ctx.gate_active(target.ip, VERB)
+                binding = self.ctx.gate_active(
+                    target.ip, VERB, ledger_key=self._ledger_key(target))
             except GateRefused as exc:
                 # A refusal is a skip, never a reason to connect anyway. The budget for this
                 # host is gone (or its verdict is not in_scope), so stop here and move on to
@@ -540,11 +563,11 @@ class PortScanModule(Module):
 
         now = self.ctx.clock_now()
         evidence = self._evidence(self._record(target.ip, probed, opens, cut_short), target.ip)
-        host_id = f"{HOST_ID_PREFIX}{target.ip}"
+        host_id = make_host_id(target.ip)
         host_known = self.ctx.graph.store.get(host_id) is not None
 
         for open_port in opens:
-            service_id = f"{SERVICE_ID_PREFIX}{target.ip}:{open_port.port}/{PROTO}"
+            service_id = make_service_id(target.ip, open_port.port, PROTO)
             self.ctx.graph.upsert_node(make_node(
                 "Service", service_id,
                 binding=open_port.binding,  # the gate's own binding for THIS probe

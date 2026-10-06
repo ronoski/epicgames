@@ -53,12 +53,17 @@ import requests
 from ... import verbs
 from ...factory import make_edge, make_node
 from ...models import EvidenceRef, ScopeBinding, Sensitivity, Verdict
-from ...scope import classify, normalize_host
+from ...scope import classify
+from ...urls import (  # the single implementation; re-exported for the module's API
+    ID_PLACEHOLDER, canonical_host, is_opaque_segment, path_template, route_id,
+    webapp_id,
+)
 from ..base import Module, ModuleContext, register
 
 #: Wayback CDX query. Built literally rather than via ``params=`` so the emitted URL is
 #: exact and reviewable. ``collapse=urlkey`` asks the index for one row per distinct URL
 #: and ``limit`` caps the response server-side (it is re-enforced client-side below).
+ARCHIVE_HOST = "web.archive.org"
 CDX_URL = (
     "https://web.archive.org/cdx/search/cdx"
     "?url={host}/*&output=json&fl=original,timestamp&collapse=urlkey&limit={limit}"
@@ -132,25 +137,6 @@ def _is_opaque(segment: str) -> bool:
     )
 
 
-def path_template(path: str) -> str:
-    """Normalize a URL path to a stable route template, or ``""`` if unusable.
-
-    Opaque segments become :data:`ID_PLACEHOLDER`, empty segments collapse (so a trailing
-    slash and a repeated ``//`` do not fork a template) and the root path is ``"/"``.
-    Case is preserved: paths are case-sensitive, so lowercasing would merge distinct routes.
-    """
-
-    path = path or "/"
-    if not _SAFE_PATH_RE.match(path) or "@" in path:
-        return ""  # mangled row, or an email in the path: do not collect (§6)
-    segments = [s for s in path.split("/") if s]
-    if len(segments) > MAX_PATH_SEGMENTS:
-        return ""
-    template = "/" + "/".join(
-        ID_PLACEHOLDER if _is_opaque(s) else s for s in segments
-    )
-    return template if len(template) <= MAX_TEMPLATE_CHARS else ""
-
 
 def parse_archived_url(original: str) -> tuple[str, str, str] | None:
     """Split one CDX ``original`` URL into ``(scheme, host, template)``.
@@ -171,7 +157,7 @@ def parse_archived_url(original: str) -> tuple[str, str, str] | None:
         return None
     if "@" in netloc:
         return None  # userinfo may be a credential or another person's identifier
-    host = normalize_host(hostname or "")
+    host = canonical_host(hostname or "")
     if not host or len(host) > 253 or not _FQDN_RE.match(host) or classify(host) == "ip":
         return None
     template = path_template(path)
@@ -238,6 +224,14 @@ class WaybackModule(Module):
             return summary
 
         for host in hosts:
+            # web.archive.org is a THIRD-PARTY archive: its politeness budget is
+            # separate and never debits the target's ledger (safety-model.md §4).
+            if not self.ctx.spend_third_party(ARCHIVE_HOST):
+                self.log.info("wayback: third-party budget exhausted; deferring %s", host)
+                summary["errors"].append({"host": host,
+                                          "error": "third-party budget exhausted"})
+                summary["truncated"] = True
+                break
             summary["queried"] += 1
             body, err = self._fetch(host)
             if err:
@@ -282,7 +276,7 @@ class WaybackModule(Module):
 
         out: list[str] = []
         for seed in seeds or []:
-            host = normalize_host(self._seed_host(seed).lstrip("*."))
+            host = canonical_host(self._seed_host(seed).lstrip("*."))
             if not host or classify(host) == "ip" or not _FQDN_RE.match(host):
                 continue  # CDX is queried by name; raw IPs and junk have no url prefix
             if host not in out:
@@ -390,16 +384,16 @@ class WaybackModule(Module):
             scheme, host, template = parsed
             ts = timestamp if _CDX_TS_RE.match(timestamp) else ""
 
-            webapp_id = f"web:{scheme}://{host}"
-            route_id = f"route:{webapp_id}{template}"
-            if route_id not in routes and len(routes) >= MAX_TEMPLATES_PER_HOST:
+            app_id = webapp_id(scheme, host)
+            rt_id = route_id(app_id, template)
+            if rt_id not in routes and len(routes) >= MAX_TEMPLATES_PER_HOST:
                 summary["truncated"] = True
                 self.log.warning("wayback: %s/* hit the %d-template cap; requeue for the rest",
                                  queried, MAX_TEMPLATES_PER_HOST)
                 break
-            self._fold(apps, webapp_id, {"host": host, "scheme": scheme}, ts)
-            self._fold(routes, route_id, {"host": host, "template": template,
-                                          "webapp": webapp_id}, ts)
+            self._fold(apps, app_id, {"host": host, "scheme": scheme}, ts)
+            self._fold(routes, rt_id, {"host": host, "template": template,
+                                       "webapp": app_id}, ts)
         return apps, routes
 
     @staticmethod
@@ -451,12 +445,12 @@ class WaybackModule(Module):
         """Write the in-scope WebApp/Route nodes and their ``exposes`` edges."""
 
         emitted = 0
-        for webapp_id, app in apps.items():
+        for app_id, app in apps.items():
             binding = self._binding(app["host"], summary)
-            if binding is None or webapp_id in self._emitted_ids:
+            if binding is None or app_id in self._emitted_ids:
                 continue
             self.ctx.graph.upsert_node(make_node(
-                "WebApp", webapp_id,
+                "WebApp", app_id,
                 binding=binding,
                 source=SOURCE,
                 now=self.ctx.clock_now(),
@@ -468,20 +462,20 @@ class WaybackModule(Module):
                 coverage={"enumerated": True},  # archive set pulled; nothing fingerprinted
                 data_subject="none",
             ))
-            self._emitted_ids.add(webapp_id)
+            self._emitted_ids.add(app_id)
             summary["webapps"] += 1
             summary["emitted"] += 1
             emitted += 1
 
-        for route_id, route in routes.items():
-            webapp_id = route["webapp"]
-            if webapp_id not in self._emitted_ids:
+        for rt_id, route in routes.items():
+            app_id = route["webapp"]
+            if app_id not in self._emitted_ids:
                 continue  # its WebApp was dropped or capped: never orphan a Route
             binding = self._binding(route["host"], summary)
-            if binding is None or route_id in self._emitted_ids:
+            if binding is None or rt_id in self._emitted_ids:
                 continue
             self.ctx.graph.upsert_node(make_node(
-                "Route", route_id,
+                "Route", rt_id,
                 binding=binding,
                 source=SOURCE,
                 now=self.ctx.clock_now(),
@@ -492,13 +486,13 @@ class WaybackModule(Module):
                 coverage={"enumerated": True},
                 data_subject="none",
             ))
-            self._emitted_ids.add(route_id)
+            self._emitted_ids.add(rt_id)
             summary["routes"] += 1
             summary["emitted"] += 1
             emitted += 1
 
             edge = make_edge(
-                "exposes", webapp_id, route_id,
+                "exposes", app_id, rt_id,
                 binding=binding,
                 source=SOURCE,
                 now=self.ctx.clock_now(),

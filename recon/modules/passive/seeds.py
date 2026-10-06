@@ -28,9 +28,12 @@ import re
 from dataclasses import dataclass, field
 
 from ..base import Module, ModuleContext, register
-from ...factory import make_node
+from ...factory import make_edge, make_node
 from ...models import EvidenceRef, Sensitivity, Verdict
-from ...scope import classify, normalize_host, registrable_domain
+from ...scope import classify
+from ...urls import (
+    canonical_host, dns_id, domain_id, host_id, registrable_domain,
+)
 
 # Defensive ceiling on one run's seed list; a config that overflows it is truncated and
 # the truncation is reported rather than silently dropped.
@@ -91,7 +94,7 @@ def _canonical_ip(text: str) -> tuple[str, str]:
 def _canonical_host(text: str) -> str:
     """Return the canonical (lowercase, punycode, dot-stripped) fqdn, or ``""``."""
 
-    host = normalize_host(text)
+    host = canonical_host(text)
     if not host.isascii():
         try:  # IDN/punycode normalization per docs/SPEC.md §3.1
             host = host.encode("idna").decode("ascii").lower()
@@ -157,6 +160,22 @@ class SeedsModule(Module):
             self.log.warning("evidence store unavailable for seed %s: %s", seed.value, exc)
             return []
         return [ref]
+
+    def _emit_containment(self, fqdn: str, apex: str, summary: dict) -> None:
+        """Link a seeded hostname to its registrable domain via ``subdomain_of``.
+
+        Both endpoints must already hold a retainable verdict of their own; this edge
+        records containment, it never launders one node's verdict onto the other.
+        """
+
+        binding = self.ctx.bind(fqdn)
+        if binding.verdict not in _RETAINABLE:
+            return
+        self.ctx.graph.upsert_edge(make_edge(
+            "subdomain_of", dns_id(fqdn), domain_id(apex),
+            binding=binding, source=self.name, now=self.ctx.clock_now(),
+        ))
+        summary["containment_edges"] = summary.get("containment_edges", 0) + 1
 
     def _emit(self, node_type: str, node_id: str, value: str, attrs: dict,
               evidence: list[EvidenceRef], summary: dict) -> str:
@@ -287,20 +306,28 @@ class SeedsModule(Module):
             evidence = self._evidence(seed)
             attrs = self._attrs(seed)
             if seed.kind == "ip":
-                self._emit("Host", f"host:{seed.value}", seed.value, attrs, evidence, summary)
+                self._emit("Host", host_id(seed.value), seed.value, attrs, evidence, summary)
                 continue
             if seed.kind == "net":
-                self._emit("NetBlock", f"net:{seed.value}", seed.value, attrs, evidence, summary)
+                self._emit("NetBlock", "net:" + seed.value, seed.value, attrs, evidence, summary)
                 continue
 
-            self._emit("DNSName", f"dns:{seed.value}", seed.value, attrs, evidence, summary)
+            dns_outcome = self._emit("DNSName", dns_id(seed.value), seed.value, attrs,
+                                     evidence, summary)
             # The apex earns its own verdict: an exact-host include does not authorize the
             # registrable domain (default-deny), so bind and emit it separately.
             apex = attrs["registrable"]
             apex_attrs = {"registrable": apex, "seed_origin": _SEED_ORIGIN}
-            if self._emit("Domain", f"domain:{apex}", apex, apex_attrs,
-                          evidence, summary) == "skipped":
+            apex_outcome = self._emit("Domain", domain_id(apex), apex, apex_attrs,
+                                      evidence, summary)
+            if apex_outcome == "skipped":
                 summary["domains_skipped"] += 1
+            elif dns_outcome != "skipped" and seed.value != apex:
+                # subdomain_of is now a DECLARED edge, so apex/subdomain containment is
+                # finally expressible. It could not be modelled before: derived_from is the
+                # only other containment edge and invariant I5 requires its target to be an
+                # Artifact, so using it here would have guaranteed a violation.
+                self._emit_containment(seed.value, apex, summary)
 
         self.log.info("seeds: %d/%d retained (%s)", summary["emitted"],
                       summary["unique_seeds"], summary["verdicts"])

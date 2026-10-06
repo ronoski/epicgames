@@ -63,7 +63,11 @@ from ... import verbs
 from ...evidence import redact
 from ...factory import make_edge, make_node
 from ...models import EvidenceRef, ScopeBinding, Sensitivity, Verdict
-from ...scope import classify, normalize_host
+from ...urls import (
+    authority, canonical_host, operation_id, route_id as make_route_id,
+    webapp_id_from_url,
+)
+from ...scope import classify
 from ..base import GateRefused, Module, ModuleContext, register
 
 #: Whitelisted **active** verbs for this module, in the order they may be spent.
@@ -147,12 +151,6 @@ MAX_TITLE_CHARS = 200
 MAX_REDIRECT_CHARS = 300
 
 
-def authority(value: str) -> str:
-    """URL authority for ``value``: an IPv6 literal is bracketed, anything else is itself."""
-
-    return f"[{value}]" if ":" in value else value
-
-
 def page_title(body: str) -> str:
     """First ``<title>`` of an HTML body, whitespace-collapsed and capped. ``""`` if none."""
 
@@ -184,7 +182,7 @@ def redirect_target(location: str) -> str:
     scheme = (parts.scheme or "").lower()
     if scheme and scheme not in ("http", "https"):
         return ""
-    host = normalize_host(parts.hostname or "")
+    host = canonical_host(parts.hostname or "")
     path = parts.path or ""
     if host and scheme:
         target = f"{scheme}://{authority(host)}{path}"
@@ -308,7 +306,7 @@ class HttpProbeModule(Module):
 
         out: list[str] = []
         for seed in seeds or []:
-            value = normalize_host(self._seed_value(seed))
+            value = canonical_host(self._seed_value(seed))
             if value.startswith("[") and value.endswith("]"):
                 value = value[1:-1]  # an IPv6 authority arrives bracketed
             if not value or len(value) > 253:
@@ -487,7 +485,8 @@ class HttpProbeModule(Module):
             "every binding here comes from gate_active and must be in_scope"
 
         now = self.ctx.clock_now()
-        webapp_id = f"web:{scheme}://{authority(value)}"
+        # from the probed URL, so a non-default port is preserved in the id
+        webapp_id = webapp_id_from_url(url)
         self.ctx.graph.upsert_node(make_node(
             "WebApp", webapp_id,
             binding=probes[0].binding,
@@ -502,9 +501,9 @@ class HttpProbeModule(Module):
         ))
         summary["webapps"] += 1
 
-        route_id = f"route:{webapp_id}/"  # the "/" template; the Route itself is not ours
+        route_id = make_route_id(webapp_id, "/")  # the "/" template
         for probe in probes:
-            op_id = f"op:{probe.method}:{route_id}"
+            op_id = operation_id(probe.method, route_id)
             self.ctx.graph.upsert_node(make_node(
                 "Operation", op_id,
                 binding=probe.binding,

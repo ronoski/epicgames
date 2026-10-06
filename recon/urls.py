@@ -35,9 +35,24 @@ _LABEL = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
 
 # Path segments that are obviously identifiers get collapsed to {id} so one route template
 # does not explode into thousands of Route nodes.
+ID_PLACEHOLDER = "{id}"
+
 _NUMERIC = re.compile(r"^\d+$")
-_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-_HEX = re.compile(r"^[0-9a-f]{16,}$")
+_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+_HEX_BLOB = re.compile(r"^[0-9a-f]{16,}$", re.IGNORECASE)
+# Three base64url runs separated by dots: a JWT in a path.
+_JWT = re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$")
+# A very long unbroken base64url run is opaque whether or not it has a digit.
+_LONG_BLOB = re.compile(r"^[A-Za-z0-9_-]{40,}$")
+# A shorter unbroken alphanumeric run is opaque only if it contains a digit — otherwise
+# "ForgotPasswordConfirmation" would be mistaken for a token.
+_ALNUM_ID = re.compile(r"^(?=.*\d)[A-Za-z0-9]{20,}$")
+# Printable, no whitespace. A row failing this is a mangled archive index entry.
+_SAFE_PATH = re.compile(r"^[\x21-\x7e]*$")
+
+_MAX_PATH_SEGMENTS = 12
+_MAX_TEMPLATE_CHARS = 200
 
 # Multi-part public suffixes. NOTE: this is a pragmatic subset, not the Public Suffix List.
 # The rate-ledger key depends on registrable_domain, so getting this wrong means two
@@ -152,21 +167,42 @@ def canonical_url(url: str) -> str:
     return f"{scheme}://{auth}{path}" + (f"?{query}" if query else "")
 
 
-def path_template(path: str) -> str:
-    """Collapse identifier-looking segments so routes don't explode into one-per-id."""
+def is_opaque_segment(seg: str) -> bool:
+    """True when a path segment is an identifier/token rather than a route name."""
 
-    if not path or not path.startswith("/"):
-        path = "/" + (path or "")
-    out = []
-    for seg in path.split("/"):
-        low = seg.lower()
-        if _NUMERIC.match(seg) or _UUID.match(low) or _HEX.match(low):
-            out.append("{id}")
-        else:
-            out.append(seg)
-    tmpl = "/".join(out)
-    # collapse a trailing slash except for the root
-    return tmpl if tmpl == "/" else tmpl.rstrip("/") or "/"
+    return bool(
+        _NUMERIC.match(seg)
+        or _UUID.match(seg)
+        or _HEX_BLOB.match(seg)
+        or _JWT.match(seg)
+        or _LONG_BLOB.match(seg)
+        or _ALNUM_ID.match(seg)
+    )
+
+
+def path_template(path: str) -> str:
+    """Normalize a URL path to a stable route template, or ``""`` if unusable.
+
+    Opaque segments become :data:`ID_PLACEHOLDER`; empty segments collapse (so a trailing
+    slash and a repeated ``//`` do not fork a template); the root is ``"/"``. **Case is
+    preserved** — paths are case-sensitive, so lowercasing would merge distinct routes.
+
+    Returning ``""`` is a safety rule, not tidiness. A path containing ``@`` is very
+    likely an email address, i.e. other-person PII, which the safety model says to not
+    collect rather than redact after the fact; a path with whitespace or pathological
+    depth/length is a mangled index row that would only pollute the graph.
+    """
+
+    path = path or "/"
+    if not _SAFE_PATH.match(path) or "@" in path:
+        return ""
+    segments = [s for s in path.split("/") if s]
+    if len(segments) > _MAX_PATH_SEGMENTS:
+        return ""
+    template = "/" + "/".join(
+        ID_PLACEHOLDER if is_opaque_segment(s) else s for s in segments
+    )
+    return template if len(template) <= _MAX_TEMPLATE_CHARS else ""
 
 
 # --- id constructors ---------------------------------------------------

@@ -50,7 +50,10 @@ import re
 from ... import verbs
 from ...factory import make_node
 from ...models import EvidenceRef, Sensitivity, Verdict
-from ...scope import classify, normalize_host, registrable_domain
+from ...scope import classify
+from ...urls import (
+    canonical_host, dns_id, hypothesis_id, registrable_domain, valid_fqdn,
+)
 from ..base import Module, ModuleContext, register
 
 #: Whitelisted verb (``verbs.ALLOWED``, deliberately NOT in ``verbs.ACTIVE``). This module
@@ -118,16 +121,6 @@ def numeric_offsets(delta: int = NUMERIC_DELTA) -> tuple[int, ...]:
     for step in range(1, max(0, delta) + 1):
         out.extend((step, -step))
     return tuple(out)
-
-
-def valid_fqdn(host: str) -> bool:
-    """Is ``host`` a plausible, canonical hostname we would be willing to mint an id for?"""
-
-    if not host or len(host) > 253 or not _FQDN_RE.match(host):
-        return False
-    if any(len(label) > 63 for label in host.split(".")):
-        return False
-    return classify(host) != "ip"
 
 
 def numeric_mutations(host: str, delta: int = NUMERIC_DELTA) -> list[str]:
@@ -281,7 +274,7 @@ class PermutationsModule(Module):
             raw = raw[len(_SEED_ID_PREFIX):]
         elif raw.startswith(_FOREIGN_ID_PREFIXES):
             return ""  # some other node kind slipped into the seed list
-        host = normalize_host(raw.lstrip("*."))
+        host = canonical_host(raw.lstrip("*."))
         return host if valid_fqdn(host) else ""
 
     # --- generation --------------------------------------------------------
@@ -370,9 +363,9 @@ class PermutationsModule(Module):
     def _emit(self, fqdn: str, generator: str, record: str, summary: dict) -> None:
         """Bind one candidate and, if ``in_scope`` and new, upsert it as a Hypothesis."""
 
-        node_id = f"hyp:dns-candidate:{fqdn}"
+        node_id = hypothesis_id("dns-candidate", fqdn)
         store = self.ctx.graph.store
-        if store.get(node_id) is not None or store.get(f"dns:{fqdn}") is not None:
+        if store.get(node_id) is not None or store.get(dns_id(fqdn)) is not None:
             # Already a known name, or a candidate from an earlier cycle: re-upserting
             # would self-corroborate a guess and reset its decay clock.
             summary["already_known"] += 1
