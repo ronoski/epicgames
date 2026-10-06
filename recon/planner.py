@@ -126,6 +126,10 @@ RULES: list[Rule] = [
     Rule("tls-fingerprint", "WebApp", "tls_probe", "tls-handshake", False, 3.0, 1.5,
          _not_fingerprinted),
     Rule("auth-model", "WebApp", "oidc_discovery", "http-GET", False, 5.0, 1.5, _no_auth),
+    # Mobile-association files are a trust declaration and the deep-link surface, so
+    # they are worth as much as the OIDC document and cost the same.
+    Rule("mobile-association", "WebApp", "associated_domains", "http-GET", False,
+         4.0, 1.5, lambda n, s: not s.has_out_edge(n.id, "authenticates_with")),
     Rule("api-contract", "WebApp", "openapi_discovery", "read-openapi", False, 6.0, 2.0, _no_typed_ops),
     Rule("graphql-contract", "WebApp", "graphql_introspect", "graphql-introspect", False, 6.0, 2.0,
          _no_typed_ops),

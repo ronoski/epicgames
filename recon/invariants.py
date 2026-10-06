@@ -28,11 +28,16 @@ def check(
     current_snapshot: str | None = None,
     log=None,
     snapshot=None,
+    now=None,
 ) -> list[Violation]:
     """Check the safety invariants over the data. Empty list means clean.
 
     ``log`` (an :class:`~recon.events.EventLog`) enables the log-derived invariants
     I10–I12; ``snapshot`` enables the staleness check in I12.
+
+    ``now`` is injectable because I12 is time-dependent: defaulting to the wall clock
+    would make the check depend on when it happens to run, which breaks both tests and
+    any audit of historical data.
     """
 
     v: list[Violation] = []
@@ -117,7 +122,7 @@ def check(
 
     # I12: a stale snapshot blocks downstream action — no ALLOW may be granted after the
     # pinned snapshot went stale.
-    if snapshot is not None and snapshot.is_stale(_now()):
+    if snapshot is not None and snapshot.is_stale(now or _now()):
         allows = [
             e for e in events
             if e.kind == "gate_decision_recorded" and e.payload.get("decision") == "ALLOW"
