@@ -79,7 +79,33 @@ recon run -c configs/prog.yaml --execute --max-active 20 --json
 
 # 4. Check the safety invariants over the resulting graph. Non-zero exit = stop.
 recon invariants -c configs/prog.yaml --json
+
+# 5. What changed since last time? On a long-term target this is THE question.
+recon diff -c configs/prog.yaml --workdir .recon --json          # last run's delta
+recon diff --workdir .recon --all-runs --json                    # per-run history
+
+# 6. Did the program's scope move under us? Exit 3 = drifted.
+recon drift -c configs/prog.yaml --json                          # report
+recon drift -c configs/prog.yaml --rebind --json                 # re-bind retained data
+recon drift -c configs/prog.yaml --accept --json                 # pin the new policy
+
+# 7. Prove the log is the source of truth (rebuilds the graph from events alone).
+recon replay --workdir .recon --json
 ```
+
+**Change over time.** The graph is rehydrated from the event log at the start of every
+run, so a second run over an unchanged scope reports `no change since the previous run`
+rather than re-discovering everything. `recon diff` reads the delta straight off the log,
+so it cannot disagree with the graph. A `dangling-cname` hypothesis appearing is called
+out by name in the headline — it is the most actionable thing a passive sweep produces.
+
+**Scope drift is a safety gate, not a notification.** Every retained datum carries the
+verdict it was observed under, so when the policy moves those verdicts describe a policy
+that no longer exists. A run that detects unreviewed drift **refuses `--execute`** and
+downgrades to dry-run; the drift is only cleared by an explicit `--accept`, and
+`--rebind` re-evaluates everything already retained (a node that loses scope keeps its
+data and stops being actionable — deleting it would destroy the record that it was
+collected legitimately).
 
 **Reading `run` output.** `cycles_detail[].outcome` is one of `planned` (dry-run),
 `ran`, `refused` (the gate said no — the reason is in `detail`), `skipped`, `error`.

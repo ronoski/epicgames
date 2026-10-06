@@ -15,7 +15,9 @@ from typing import Iterator
 
 from . import clock
 from .events import EventLog
-from .models import Confidence, Datum, Edge, Node, Provenance, ProvStep
+from .models import (
+    Confidence, Datum, Edge, Node, Provenance, ProvStep, ScopeBinding,
+)
 
 # Default independent-source corroboration bump, in log-odds.
 CORROBORATION_DELTA = 0.8
@@ -164,24 +166,89 @@ class GraphStore:
             out[n.type] = out.get(n.type, 0) + 1
         return out
 
+    # --- replay --------------------------------------------------------
+    @classmethod
+    def from_events(cls, events) -> "GraphStore":
+        """Rebuild the projection by replaying the log (``SPEC.md`` §4.1).
+
+        Events are applied in ``seq`` order with the same merge/fork logic as a live run,
+        so a replayed store is identical to the one the run produced. An event from an
+        older schema that carries no datum is skipped rather than guessed at — a partial
+        replay that silently invents nodes would be worse than an incomplete one.
+        """
+
+        store = cls()
+        skipped = 0
+        for evt in sorted(events, key=lambda e: e.seq):
+            if evt.kind in ("node_upserted", "contradiction_forked") and evt.payload.get("node"):
+                store.apply_node(_rebuild_datum("node", evt.payload["node"]))
+            elif evt.kind in ("edge_upserted", "contradiction_forked") and evt.payload.get("edge"):
+                store.apply_edge(_rebuild_datum("edge", evt.payload["edge"]))
+            elif evt.kind == "scope_binding_set" and evt.payload.get("binding"):
+                # A re-bind is a real state change (scope drift moved an asset), so replay
+                # must apply it; otherwise the rebuilt graph asserts a superseded verdict.
+                target = store.nodes.get(evt.payload.get("id", ""))
+                if target is not None:
+                    b = evt.payload["binding"]
+                    target.scope_binding = ScopeBinding(
+                        verdict=b["verdict"], snapshot_id=b["snapshot_id"],
+                        observed_at=b["observed_at"], rule_matched=b.get("rule_matched", ""),
+                    )
+            elif evt.kind in ("node_upserted", "edge_upserted", "contradiction_forked"):
+                skipped += 1
+        store.replay_skipped = skipped  # type: ignore[attr-defined]
+        return store
+
 
 class Graph:
-    """Write facade: upsert -> event -> apply. The event log stays the source of truth."""
+    """Write facade: upsert -> event -> apply. The event log stays the source of truth.
+
+    The upsert events carry the **whole datum**, not just its id. That is what makes the
+    log authoritative rather than merely a trace: :meth:`GraphStore.from_events` can
+    rebuild an identical projection from it (see ``recon replay``). Logging only
+    ``{id, type, outcome}`` would have left the graph unreconstructable and the
+    event-sourcing claim in ``SPEC.md`` §4.1 unprovable.
+    """
 
     def __init__(self, log: EventLog | None = None, store: GraphStore | None = None) -> None:
         self.log = log or EventLog()
         self.store = store or GraphStore()
 
+    @staticmethod
+    def _observation_key(prefix: str, datum_id: str, datum: Datum) -> str:
+        """Idempotency key for ONE observation of a datum.
+
+        It must include the observing source. Keying on ``(id, last_seen)`` alone dropped
+        a second observation of the same node by a *different* module within the same
+        timestamp — which is exactly the independent corroboration the confidence model
+        depends on. The log then lost information the live store had used, and a replay
+        diverged from the run it was supposed to reproduce.
+        """
+
+        sources = ",".join(sorted(f"{s.tool}@{s.rule_id}" for s in datum.provenance.chain))
+        return f"{prefix}:{datum_id}:{datum.temporal.last_seen}:{sources}"
+
     def upsert_node(self, node: Node) -> UpsertResult:
+        # Snapshot the datum as submitted, BEFORE the store merges it in place: replay
+        # must see the same inputs in the same order, not the merged outcome.
+        payload = node.to_dict()
         result = self.store.apply_node(node)
+        # Key on the RESULTING id, after apply: a contradiction fork yields a new id
+        # ("...#fork1"), so keying on the submitted id would have deduped the fork event
+        # away and the log would have lost the record of the contradiction entirely.
+        key = self._observation_key("node", result.id, node)
         kind = "contradiction_forked" if result.outcome == "forked" else "node_upserted"
-        self.log.append(kind, {"id": result.id, "type": node.type, "outcome": result.outcome},
-                        idempotency_key=f"node:{result.id}:{node.temporal.last_seen}")
+        self.log.append(kind, {"id": result.id, "type": node.type,
+                               "outcome": result.outcome, "node": payload},
+                        idempotency_key=key)
         return result
 
     def upsert_edge(self, edge: Edge) -> UpsertResult:
+        payload = edge.to_dict()
         result = self.store.apply_edge(edge)
+        key = self._observation_key("edge", result.id, edge)
         kind = "contradiction_forked" if result.outcome == "forked" else "edge_upserted"
-        self.log.append(kind, {"id": result.id, "type": edge.type, "outcome": result.outcome},
-                        idempotency_key=f"edge:{result.id}:{edge.temporal.last_seen}")
+        self.log.append(kind, {"id": result.id, "type": edge.type,
+                               "outcome": result.outcome, "edge": payload},
+                        idempotency_key=key)
         return result

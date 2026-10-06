@@ -14,12 +14,16 @@ import logging
 import sys
 from dataclasses import asdict
 
-from . import __version__, invariants, planner
+from pathlib import Path
+
+from . import __version__, drift, invariants, planner, report
 from .config import Config
 from .loop import AutonomousLoop
 from .modules import load_all
 from .pipeline import build_runtime, seed_graph
-from .snapshot import take_snapshot
+from .events import EventLog
+from .snapshot import Snapshot, take_snapshot
+from .store import GraphStore
 
 
 def _emit(obj, as_json: bool) -> None:
@@ -94,6 +98,18 @@ def cmd_run(args) -> int:
     if args.execute and not cfg.allow_active:
         print("note: --execute given but config has allow_active=false — "
               "active modules stay disabled (passive only).", file=sys.stderr)
+
+    # Unreviewed scope drift blocks action. Every retained datum carries the verdict it was
+    # observed under, so acting on a scope that moved underneath us would be acting on an
+    # authorization that no longer exists. Downgrade to dry-run and say what to do.
+    drift_blocked = None
+    if rt.drift is not None and getattr(rt.drift, "drifted", False):
+        drift_blocked = rt.drift.summary()
+        if args.execute:
+            dry_run = True
+            print(f"REFUSING to execute: scope drift detected ({drift_blocked}). "
+                  "Review with `recon drift --rebind`, then `recon drift --accept`.",
+                  file=sys.stderr)
     loop = AutonomousLoop(
         rt.ctx, dry_run=dry_run, max_cycles=args.max_cycles,
         max_active_actions=args.max_active, passive_first=cfg.passive_first,
@@ -105,8 +121,12 @@ def cmd_run(args) -> int:
         "cycles_detail": [asdict(c) for c in result.cycles][: args.limit],
         "violations": [asdict(v) for v in result.violations],
         "dry_run": dry_run,
+        "scope_drift": drift_blocked,
+        "delta": report.delta_for(rt.graph.log.all()).to_dict(),
     }, args.json)
-    return 1 if result.violations else 0
+    if result.violations:
+        return 1
+    return 3 if drift_blocked else 0
 
 
 def cmd_invariants(args) -> int:
@@ -121,6 +141,88 @@ def cmd_invariants(args) -> int:
     )
     _emit({"violations": [asdict(v) for v in violations], "ok": not violations}, args.json)
     return 1 if violations else 0
+
+
+def cmd_diff(args) -> int:
+    """What changed since a previous run — the headline for a long-term target."""
+
+    path = Path(args.workdir) / "events.jsonl"
+    if not path.exists():
+        _emit({"error": f"no event log at {path}; run `recon run` first"}, args.json)
+        return 2
+    events = report.load_events(path)
+    if args.all_runs:
+        payload = {
+            "runs": [d.to_dict() for d in report.per_run(events)],
+            "headlines": [f"{d.run_id}: {d.headline()}" for d in report.per_run(events)],
+        }
+    else:
+        d = report.delta_since(events, run_id=args.since_run, since_ts=args.since)
+        payload = d.to_dict()
+    _emit(payload, args.json)
+    return 0
+
+
+def cmd_replay(args) -> int:
+    """Rebuild the graph projection from the event log and report what it contains.
+
+    This is the event-sourcing claim made checkable: the log is the source of truth, so a
+    replay must reproduce the graph the run produced.
+    """
+
+    path = Path(args.workdir) / "events.jsonl"
+    if not path.exists():
+        _emit({"error": f"no event log at {path}"}, args.json)
+        return 2
+    events = report.load_events(path)
+    store = GraphStore.from_events(events)
+    violations = invariants.check(store, log=None)
+    _emit({
+        "events_replayed": len(events),
+        "nodes": store.counts(),
+        "edges": len(store.edges),
+        "skipped_without_payload": getattr(store, "replay_skipped", 0),
+        "coverage": planner.coverage_report(store),
+        "violations": [asdict(v) for v in violations],
+    }, args.json)
+    return 1 if violations else 0
+
+
+def cmd_drift(args) -> int:
+    """Compare the configured policy against the last pinned snapshot."""
+
+    cfg = Config.load(args.config)
+    workdir = Path(args.workdir)
+    previous = Snapshot.load(workdir / "snapshot.json")
+    scope_cfg = cfg.raw.get("scope", {})
+    current = take_snapshot(
+        cfg.policy_text, half_life=cfg.policy_half_life,
+        include=scope_cfg.get("include", []),
+        exclude=scope_cfg.get("exclude", []),
+        prefilter=scope_cfg.get("prefilter", []),
+    )
+    rep = drift.detect(previous, current)
+    payload = {"summary": rep.summary(), **rep.to_dict(),
+               "previous_snapshot_known": previous is not None}
+
+    if args.rebind and rep.drifted:
+        # Re-bind what we ALREADY HOLD, which means replaying the persisted log rather
+        # than re-seeding from config: the question is whether the data we retained is
+        # still authorized, not what a fresh run would collect.
+        events_path = workdir / "events.jsonl"
+        if not events_path.exists():
+            payload["rebind"] = {"error": f"no event log at {events_path}; nothing retained"}
+        else:
+            store = GraphStore.from_events(report.load_events(events_path))
+            log = EventLog(path=events_path, run_id="rebind")
+            rebound = drift.rebind(store, cfg.scope, current, log=log)
+            payload["rebind"] = rebound.to_dict()
+    if args.accept:
+        current.save(workdir / "snapshot.json")
+        payload["accepted"] = True
+    _emit(payload, args.json)
+    # a drifted scope is a call to action, not a failure
+    return 3 if rep.drifted else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,6 +265,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     iv = common(sub.add_parser("invariants", help="check safety invariants over the graph"))
     iv.set_defaults(func=cmd_invariants)
+
+    df = sub.add_parser("diff", help="what changed since a previous run (the delta report)")
+    df.add_argument("--workdir", default=".recon")
+    df.add_argument("--json", action="store_true")
+    df.add_argument("--since-run", default=None,
+                    help="report everything after this run id")
+    df.add_argument("--since", default=None,
+                    help="report everything after this ISO timestamp")
+    df.add_argument("--all-runs", action="store_true", help="one delta per run")
+    df.set_defaults(func=cmd_diff)
+
+    rp = sub.add_parser("replay", help="rebuild the graph from the event log")
+    rp.add_argument("--workdir", default=".recon")
+    rp.add_argument("--json", action="store_true")
+    rp.set_defaults(func=cmd_replay)
+
+    dr = common(sub.add_parser(
+        "drift", help="diff the configured policy against the last pinned snapshot"))
+    dr.add_argument("--rebind", action="store_true",
+                    help="re-evaluate retained nodes against the new snapshot")
+    dr.add_argument("--accept", action="store_true",
+                    help="pin the current policy as the new snapshot")
+    dr.set_defaults(func=cmd_drift)
     return p
 
 

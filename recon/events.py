@@ -25,6 +25,25 @@ EVENT_KINDS = {
 }
 
 
+def _next_seq(path: Path) -> int:
+    """One past the highest ``seq`` already in the log file (0 for a new log)."""
+
+    if not path.exists():
+        return 0
+    highest = -1
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                highest = max(highest, int(json.loads(line).get("seq", -1)))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+    except OSError:
+        return 0
+    return highest + 1
+
+
 @dataclass
 class Event:
     seq: int
@@ -46,8 +65,14 @@ class EventLog:
         self.path = Path(path) if path else None
         self._events: list[Event] = []
         self._seen_keys: set[str] = set()
+        # Sequence numbers must CONTINUE an existing log, not restart at 0. Restarting
+        # gave every run overlapping seqs, so ordering by seq interleaved runs wrongly and
+        # a replay could apply a later run's event before the earlier one that created the
+        # node it refers to. The log is append-only across runs, so the counter is too.
+        self._seq_offset = 0
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._seq_offset = _next_seq(self.path)
 
     def append(
         self,
@@ -64,7 +89,7 @@ class EventLog:
         if idempotency_key and idempotency_key in self._seen_keys:
             return None  # idempotent no-op
         evt = Event(
-            seq=len(self._events),
+            seq=self._seq_offset + len(self._events),
             ts=ts or clock.iso(),
             run_id=self.run_id,
             kind=kind,

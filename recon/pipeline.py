@@ -17,6 +17,7 @@ from .evidence import EvidenceStore
 from .events import EventLog
 from .modules.base import ModuleContext
 from .ratelimit import RateLedger
+from . import drift
 from .snapshot import Snapshot, take_snapshot
 from .store import Graph, GraphStore
 
@@ -26,6 +27,8 @@ class Runtime:
     config: Config
     ctx: ModuleContext
     graph: Graph
+    drift: object | None = None
+    rehydrated_events: int = 0
 
     @property
     def store(self) -> GraphStore:
@@ -43,18 +46,49 @@ def build_runtime(
     persist: bool = True,
 ) -> Runtime:
     workdir = Path(workdir)
-    log = EventLog(path=(workdir / "events.jsonl") if persist else None, run_id=run_id)
-    graph = Graph(log=log, store=GraphStore())
+    events_path = workdir / "events.jsonl"
 
+    # Rehydrate the graph from the persisted log before anything else. Without this every
+    # run started blank, re-"discovered" what previous runs already knew, and every delta
+    # reported the whole graph as new — which defeats the entire point of a long-lived
+    # knowledge base. The log is the source of truth, so the projection is rebuilt from it.
+    store = GraphStore()
+    rehydrated = 0
+    if persist and events_path.exists():
+        prior = EventLog.replay(events_path)
+        store = GraphStore.from_events(prior)
+        rehydrated = len(prior)
+
+    log = EventLog(path=events_path if persist else None, run_id=run_id)
+    graph = Graph(log=log, store=store)
+
+    scope_cfg = config.raw.get("scope", {}) if isinstance(config.raw, dict) else {}
     if snapshot is None and config.policy_text:
-        snapshot = take_snapshot(config.policy_text, now=now,
-                                 half_life=config.policy_half_life)
+        snapshot = take_snapshot(
+            config.policy_text, now=now, half_life=config.policy_half_life,
+            include=scope_cfg.get("include", []),
+            exclude=scope_cfg.get("exclude", []),
+            prefilter=scope_cfg.get("prefilter", []),
+        )
+
+    drift_report = None
     if snapshot is not None:
         log.append("scope_snapshot_taken", {
             "snapshot_id": snapshot.snapshot_id,
             "content_sha256": snapshot.content_sha256,
             "half_life": snapshot.half_life,
         })
+        # Drift is cross-run by nature, so the previous snapshot is read off disk.
+        snapshot_path = workdir / "snapshot.json"
+        previous = Snapshot.load(snapshot_path) if persist else None
+        drift_report = drift.detect(previous, snapshot)
+        if drift_report.drifted:
+            log.append("scope_drift_detected", drift_report.to_dict())
+        # Pin the snapshot only when there is nothing to review. Saving it on a DRIFTED
+        # policy would silently accept the change and dissolve the gate the drift just
+        # raised; acceptance is an explicit act (`recon drift --accept`).
+        if persist and not drift_report.drifted:
+            snapshot.save(snapshot_path)
 
     ctx = ModuleContext(
         scope=config.scope,
@@ -74,7 +108,8 @@ def build_runtime(
         timeout=config.timeout,
         now=now,
     )
-    return Runtime(config=config, ctx=ctx, graph=graph)
+    return Runtime(config=config, ctx=ctx, graph=graph, drift=drift_report,
+                   rehydrated_events=rehydrated)
 
 
 def seed_graph(rt: Runtime) -> dict:

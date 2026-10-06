@@ -76,6 +76,21 @@ correctness risk.
 - [x] **Stale id comment** in `schema/ontology.json`: `Hypothesis` is documented as
       `hyp:<uuid>` but the code requires the structured `hyp:dns-candidate:<fqdn>` form.
 
+### Durability fixes made while building the P2 delta report
+
+- [x] Upsert events now carry the **whole datum**, so the log is a source of truth rather
+      than a trace and `recon replay` can rebuild the graph.
+- [x] The event sequence **continues across runs** (a fresh log restarted at 0, so
+      overlapping seqs made replay interleave runs wrongly).
+- [x] The graph is **rehydrated from the log** at run start (every run previously began
+      blank and re-"discovered" what earlier runs knew, so every delta looked new).
+- [x] A run **no longer silently accepts scope drift** by pinning the new snapshot;
+      acceptance is explicit (`recon drift --accept`), and `--execute` is refused while
+      drift is unreviewed.
+- [x] Idempotency keys distinguish **observations**, not just ids: keying on
+      `(id, timestamp)` dropped a second source's corroboration and suppressed the
+      `contradiction_forked` event for a fork.
+
 ### P1 remainder
 
 - [x] **Migrate the modules onto `recon/urls.py`.** All 11 migrated; a static guard
@@ -89,11 +104,11 @@ correctness risk.
 From [`docs/domains/non-binary.md`](docs/domains/non-binary.md). Roughly highest value
 first.
 
-- [ ] **Scope-drift detector** — diff successive policy snapshots and emit drift events.
+- [x] **Scope-drift detector** — diff successive policy snapshots and emit drift events.
       This is governance; arguably belongs in P1 for a long-term target.
-- [ ] **`recon diff`** — the per-run delta report. For a long-lived target the *change*
+- [x] **`recon diff`** — the per-run delta report. For a long-lived target the *change*
       since last run is the headline, not the totals. The event log already supports it.
-- [ ] **`recon replay`** — rebuild the graph projection from the event log (proves the
+- [x] **`recon replay`** — rebuild the graph projection from the event log (proves the
       event-sourcing claim end to end).
 - [ ] **`js_analysis`** — endpoint + secret extraction from stored JS/sourcemap evidence
       (operates offline over the evidence store).
