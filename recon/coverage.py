@@ -66,6 +66,8 @@ class Gap:
     id: str = field(compare=False)
     node_id: str = field(compare=False, default="")
     verb: str = field(compare=False, default="")
+    module: str = field(compare=False, default="")
+    passive: bool = field(compare=False, default=False)
     value: float = field(compare=False, default=1.0)
     cost: float = field(compare=False, default=1.0)
     human_gated: bool = field(compare=False, default=False)

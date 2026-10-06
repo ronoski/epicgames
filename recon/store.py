@@ -133,6 +133,21 @@ class GraphStore:
     def iter_type(self, type_: str) -> Iterator[Node]:
         return (n for n in self.nodes.values() if n.type == type_)
 
+    def out_edges(self, node_id: str, type_: str | None = None) -> list[Edge]:
+        return [
+            e for e in self.edges.values()
+            if e.frm == node_id and (type_ is None or e.type == type_)
+        ]
+
+    def in_edges(self, node_id: str, type_: str | None = None) -> list[Edge]:
+        return [
+            e for e in self.edges.values()
+            if e.to == node_id and (type_ is None or e.type == type_)
+        ]
+
+    def has_out_edge(self, node_id: str, type_: str) -> bool:
+        return any(e.frm == node_id and e.type == type_ for e in self.edges.values())
+
     def counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for n in self.nodes.values():
