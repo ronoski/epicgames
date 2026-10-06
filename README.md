@@ -29,7 +29,8 @@ so the data model and safety model can be redlined against a pinned target first
 - **[`configs/epicgames.example.yaml`](configs/epicgames.example.yaml)** — scope-config skeleton to
   fill from the live policy.
 
-Start with [`docs/README.md`](docs/README.md) for the reading order.
+Start with [`docs/README.md`](docs/README.md) for the reading order, and
+[`TODO.md`](TODO.md) for what's outstanding.
 
 ## The bar for "deep" recon data
 
