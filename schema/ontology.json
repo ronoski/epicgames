@@ -95,6 +95,7 @@
     "authenticates_with",
     "calls",
     "cname_to",
+    "co_deploy",
     "contradicts",
     "corroborates",
     "derived_from",
@@ -108,6 +109,8 @@
     "presents_certificate",
     "references_object",
     "resolves_to",
+    "same_as",
+    "shared_trust_domain",
     "step_of",
     "subdomain_of",
     "takes",
@@ -117,9 +120,6 @@
     "note": "Declared but NOT usable until a human promotes them. Until then, record only as typed corroborates/contradicts evidence.",
     "edges": [
       "originated_by (NetBlock->ASN)",
-      "same_as",
-      "co_deploy",
-      "shared_trust_domain",
       "allows_origin (WebApp->Origin)"
     ],
     "nodes": [
@@ -131,7 +131,10 @@
     "bgp_origin_edge": "originated_by (never announced_by)",
     "containment_edge": "derived_from (never part_of)",
     "dns_containment_edge": "subdomain_of (DNSName->Domain); derived_from stays Artifact-only per invariant I5",
-    "certificate_edge": "presents_certificate (WebApp->Certificate)"
+    "certificate_edge": "presents_certificate (WebApp->Certificate)",
+    "identity_edge": "same_as (entity resolution; requires a STRONG shared fingerprint, never a weak one like a shared Server header)",
+    "colocation_edge": "co_deploy (same infrastructure, not same identity)",
+    "trust_edge": "shared_trust_domain (same token issuer / JWKS)"
   },
   "invariants_ref": "../docs/safety-model.md#9-machine-checkable-invariants-ci-over-the-data",
   "canonicalization": "All ids are built by recon/urls.py \u2014 the single source of truth for host, authority, path-template and id construction (SPEC.md 3.1)"

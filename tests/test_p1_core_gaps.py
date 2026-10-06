@@ -165,8 +165,12 @@ def test_containment_edges_are_declared():
 
 
 def test_still_closed_against_unknown_and_proposed():
+    # same_as/co_deploy/shared_trust_domain were promoted when entity resolution landed.
+    ontology.assert_edge_type("same_as")
     with pytest.raises(ontology.OntologyError):
-        ontology.assert_edge_type("same_as")       # still only proposed
+        ontology.assert_edge_type("allows_origin")  # still only proposed
+    with pytest.raises(ontology.OntologyError):
+        ontology.assert_edge_type("not_a_real_edge")
     with pytest.raises(ontology.OntologyError):
         ontology.assert_node_type("Wormhole")
 

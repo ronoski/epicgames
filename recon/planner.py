@@ -112,6 +112,12 @@ RULES: list[Rule] = [
          lambda n, s: not n.coverage.get("artifact_correlated")),
     Rule("generate-candidates", "DNSName", "permutations", "enumerate", True, 1.5, 0.5,
          lambda n, s: n.coverage.get("enumerated") and not n.attrs.get("permuted")),
+    # Entity resolution is offline and cheap, but only worth running once a node
+    # actually carries a fingerprint to cluster on.
+    Rule("resolve-identity", "WebApp", "correlate", "fingerprint", True, 2.0, 0.5,
+         lambda n, s: n.coverage.get("fingerprinted")
+         and not s.has_out_edge(n.id, "same_as")
+         and not s.has_out_edge(n.id, "co_deploy")),
     # --- active ladder ---------------------------------------------------
     Rule("confirm-candidate", "Hypothesis", "resolver", "resolve", False, 2.0, 1.0, _is_dns_candidate),
     Rule("resolve-name", "DNSName", "resolver", "resolve", False, 4.0, 1.0, _unresolved),

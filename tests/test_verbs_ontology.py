@@ -39,8 +39,9 @@ def test_ontology_closed_node_types():
 
 def test_ontology_edge_types_and_proposed():
     ontology.assert_edge_type("resolves_to")
-    # proposed edges are declared but not usable
+    # proposed edges are declared but not usable; same_as was promoted with
+    # entity resolution, so allows_origin is the remaining example
     with pytest.raises(ontology.OntologyError):
-        ontology.assert_edge_type("same_as")
+        ontology.assert_edge_type("allows_origin")
     with pytest.raises(ontology.OntologyError):
         ontology.assert_edge_type("not_a_real_edge")
