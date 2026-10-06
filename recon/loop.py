@@ -147,8 +147,10 @@ class AutonomousLoop:
                 return self._halt(result, f"safety invariant violation ({violations[0].code})")
 
             queue = GapQueue()
+            history = planner.dispatch_history(self.ctx.graph.log)
             for gap in planner.plan(self.store, now, allow_active=self.ctx.allow_active,
-                                    include_prefilter=self.include_prefilter):
+                                    include_prefilter=self.include_prefilter,
+                                    dispatched=history):
                 queue.enqueue(gap)
             result.human_gated = queue.human_gated()
             for gap in queue.ranked():

@@ -21,8 +21,14 @@ from .models import Confidence, Datum, Edge, Node, Provenance, ProvStep
 CORROBORATION_DELTA = 0.8
 
 
-def _sources(d: Datum) -> set[str]:
-    return {s.tool for s in d.provenance.chain}
+def _sources(d: Datum) -> set[tuple[str, str]]:
+    """The distinct (tool, rule) pairs that produced this datum.
+
+    Independence is keyed on tool AND rule: re-running the *same* extractor over the same
+    artifact is not a second opinion, so it must not raise confidence.
+    """
+
+    return {(s.tool, s.rule_id) for s in d.provenance.chain}
 
 
 def _rebuild_datum(kind: str, data: dict) -> Datum:
@@ -76,12 +82,16 @@ class GraphStore:
         # Non-conflicting: union attrs, provenance, evidence; corroborate; refresh time.
         for k, v in incoming.attrs.items():
             existing.attrs.setdefault(k, v)
+        # Corroborate ONLY on a genuinely new, independent source. Re-observing the same
+        # fact with the same tool+rule must not inflate confidence — otherwise a guess
+        # would promote itself just by being re-run.
+        new_sources = _sources(incoming) - _sources(existing)
         existing.provenance.merge(incoming.provenance)
         existing.evidence.extend(
             e for e in incoming.evidence
             if e.sha256 not in {x.sha256 for x in existing.evidence}
         )
-        if _sources(incoming) - _sources(existing) or incoming.provenance.chain:
+        if new_sources:
             existing.confidence.corroborate(CORROBORATION_DELTA)
         existing.temporal.last_seen = incoming.temporal.last_seen
         existing.temporal.last_verified = incoming.temporal.last_verified

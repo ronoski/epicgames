@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
-from .coverage import Gap, coverage_score, gap_priority, staleness
+from .coverage import Gap, coverage_score, gap_priority, parse_duration, staleness
 from .models import Node, Verdict
 from .store import GraphStore
 
@@ -31,6 +31,12 @@ class Rule:
 
     ``applies`` decides whether the node has this gap; ``module``/``verb`` say how to close
     it. ``value`` is the intrinsic worth of closing it; ``cost`` the expected expense.
+
+    ``cooldown`` is the minimum time before the same gap may be dispatched again. It exists
+    because a rule cannot always observe its own closure: a module may legitimately find
+    *nothing* (no OIDC document, no archived URLs, every resolved address out of scope), and
+    without a cooldown that gap would re-fire every cycle forever, re-spending active budget
+    on a question already answered. A negative result is an answer.
     """
 
     key: str
@@ -42,6 +48,7 @@ class Rule:
     cost: float
     applies: Callable[[Node, GraphStore], bool]
     human_gated: bool = False
+    cooldown: str = "P1D"
 
 
 def _not_enumerated(n: Node, _s: GraphStore) -> bool:
@@ -75,12 +82,23 @@ def _no_auth(n: Node, s: GraphStore) -> bool:
 
 
 def _no_typed_ops(n: Node, s: GraphStore) -> bool:
-    """WebApp has no Operation whose parameters were mined."""
+    """WebApp has nothing downstream whose parameters were mined.
+
+    Walks two hops, because the real shape is WebApp -> Route -> Operation: looking only at
+    the WebApp's direct ``exposes`` targets misses every Operation hanging off a Route and
+    the gap would never observe its own closure.
+    """
 
     for e in s.out_edges(n.id, "exposes"):
         tgt = s.get(e.to)
-        if tgt is not None and tgt.coverage.get("param_mined"):
+        if tgt is None:
+            continue
+        if tgt.coverage.get("param_mined"):
             return False
+        for e2 in s.out_edges(tgt.id, "exposes"):
+            deep = s.get(e2.to)
+            if deep is not None and deep.coverage.get("param_mined"):
+                return False
     return True
 
 
@@ -99,7 +117,8 @@ RULES: list[Rule] = [
     Rule("resolve-name", "DNSName", "resolver", "resolve", False, 4.0, 1.0, _unresolved),
     Rule("scan-host", "Host", "port_scan", "port-scan", False, 2.0, 3.0, _no_service),
     Rule("probe-http", "DNSName", "http_probe", "http-HEAD", False, 4.0, 1.5, _no_webapp),
-    Rule("tls-fingerprint", "WebApp", "tls_probe", "fingerprint", False, 3.0, 1.5, _not_fingerprinted),
+    Rule("tls-fingerprint", "WebApp", "tls_probe", "tls-handshake", False, 3.0, 1.5,
+         _not_fingerprinted),
     Rule("auth-model", "WebApp", "oidc_discovery", "http-GET", False, 5.0, 1.5, _no_auth),
     Rule("api-contract", "WebApp", "openapi_discovery", "read-openapi", False, 6.0, 2.0, _no_typed_ops),
     Rule("graphql-contract", "WebApp", "graphql_introspect", "graphql-introspect", False, 6.0, 2.0,
@@ -110,20 +129,47 @@ RULES: list[Rule] = [
 REVERIFY_AFTER_HALFLIVES = 2.0
 
 
+def dispatch_history(log) -> dict[str, datetime]:
+    """Map gap id -> last dispatch time, read back from the event log.
+
+    The log is the source of truth, so this survives process restarts and makes cooldowns
+    work across runs rather than only within one loop.
+    """
+
+    out: dict[str, datetime] = {}
+    for evt in getattr(log, "all", list)():
+        if evt.kind != "gap_dispatched":
+            continue
+        gap_id = evt.payload.get("id")
+        if not gap_id:
+            continue
+        try:
+            ts = datetime.fromisoformat(evt.ts)
+        except (ValueError, TypeError):
+            continue
+        prev = out.get(gap_id)
+        if prev is None or ts > prev:
+            out[gap_id] = ts
+    return out
+
+
 def plan(
     store: GraphStore,
     now: datetime,
     *,
     allow_active: bool = False,
     include_prefilter: bool = False,
+    dispatched: dict[str, datetime] | None = None,
 ) -> list[Gap]:
     """Derive the current gap set from the graph.
 
     Only ``in_scope`` nodes generate gaps. ``prefilter_only`` nodes are deliberately
     excluded (owned-but-unlisted assets never drive work) unless explicitly requested for
-    reporting, and even then never for an active rule.
+    reporting, and even then never for an active rule. Gaps dispatched more recently than
+    their rule's cooldown are suppressed (see :class:`Rule`).
     """
 
+    dispatched = dispatched or {}
     gaps: list[Gap] = []
     for node in list(store.nodes.values()):
         actionable = node.scope_binding.verdict == Verdict.IN_SCOPE
@@ -140,9 +186,13 @@ def plan(
                     continue
             except Exception:  # a malformed node must not break planning
                 continue
+            gap_id = f"{rule.key}:{node.id}"
+            last = dispatched.get(gap_id)
+            if last is not None and (now - last) < parse_duration(rule.cooldown):
+                continue  # already answered recently; a negative result is an answer
             gaps.append(Gap(
                 priority=gap_priority(rule.value, node, rule.cost, now),
-                id=f"{rule.key}:{node.id}",
+                id=gap_id,
                 node_id=node.id,
                 verb=rule.verb,
                 module=rule.module,
