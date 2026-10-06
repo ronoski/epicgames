@@ -376,7 +376,6 @@ def test_per_apex_name_cap_truncates_instead_of_running_away(tmp_path, monkeypat
 
 def test_apex_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(crtsh, "MAX_APEXES", 2)
-    seeds = [FakeNode(f"domain:d{i}.epicgames.com", "Domain") for i in range(5)]
     seeds = [FakeNode("domain:epicgames.com", "Domain"),
              FakeNode("domain:fortnite.com", "Domain"),
              FakeNode("domain:unrealengine.com", "Domain")]
